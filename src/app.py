@@ -49,7 +49,14 @@ MAGENTA = (255, 103, 190)
 YELLOW = (255, 210, 90)
 GREEN = (100, 235, 157)
 RED = (250, 105, 110)
-LANE_COLORS = ((74, 146, 255), (99, 204, 242), (255, 211, 82), (247, 120, 174), (186, 110, 255))
+NOTE_THEMES: dict[str, tuple[str, tuple[tuple[int, int, int], ...]]] = {
+    "standard": ("STANDARD", ((74, 146, 255), (99, 204, 242), (255, 211, 82), (247, 120, 174), (186, 110, 255))),
+    "neon": ("NEON", ((0, 236, 255), (74, 255, 166), (255, 234, 74), (255, 90, 203), (166, 92, 255))),
+    "pastel": ("PASTEL", ((120, 190, 255), (133, 232, 214), (255, 224, 134), (255, 167, 192), (199, 166, 255))),
+    "contrast": ("HIGH CONTRAST", ((72, 180, 255), (56, 255, 214), (255, 238, 46), (255, 120, 56), (255, 76, 198))),
+}
+# 既存のテスト・外部拡張との互換性を保つ標準テーマの別名。
+LANE_COLORS = NOTE_THEMES["standard"][1]
 RESOLUTION_PRESETS = ((1280, 720), (1600, 900), (1920, 1080))
 COMBO_MILESTONES = (50, 100, 500)
 COUNTDOWN_SECONDS = 3.0
@@ -86,6 +93,9 @@ class AutoBeatApp:
         self.settings.setdefault("music_volume", 0.8)
         self.settings.setdefault("sfx_volume", 0.7)
         self.settings.setdefault("note_speed", 650.0)
+        self.settings.setdefault("note_theme", "standard")
+        if self.settings["note_theme"] not in NOTE_THEMES:
+            self.settings["note_theme"] = "standard"
         self.settings.setdefault("timing_offset_ms", 0)
         self.settings.setdefault("fullscreen", False)
         self.settings.setdefault("resolution", [1280, 720])
@@ -190,6 +200,19 @@ class AutoBeatApp:
             "mono": pygame.font.SysFont("consolas", 18, bold=True),
         }
 
+    @property
+    def note_theme_key(self) -> str:
+        key = str(self.settings.get("note_theme", "standard"))
+        return key if key in NOTE_THEMES else "standard"
+
+    @property
+    def lane_colors(self) -> tuple[tuple[int, int, int], ...]:
+        return NOTE_THEMES[self.note_theme_key][1]
+
+    @property
+    def note_theme_label(self) -> str:
+        return NOTE_THEMES[self.note_theme_key][0]
+
     def text(
         self,
         value: str,
@@ -272,7 +295,8 @@ class AutoBeatApp:
             alpha = int(165 * (1.0 - progress) ** 1.7)
             if alpha <= 0:
                 continue
-            color = JUDGMENT_COLORS[effect.judgment]
+            # 判定の成否ではなく、押したレーンを即座に追えるテーマ色を使う。
+            color = self.lane_colors[effect.lane]
             layer_height = 92
             layer = pygame.Surface((lane_width, layer_height), pygame.SRCALPHA)
             center = (lane_width // 2, layer_height // 2)
@@ -741,7 +765,7 @@ class AutoBeatApp:
         now = self.audio.time if not counting_down else 0.0
         for lane in range(5):
             x = left + lane * lane_width
-            color = LANE_COLORS[lane]
+            color = self.lane_colors[lane]
             pygame.draw.rect(self.surface, (18, 28, 48), pygame.Rect(x, field_top, lane_width - 2, line_y - field_top))
             pygame.draw.line(self.surface, tuple(channel // 3 for channel in color), (x, field_top), (x, line_y), 1)
             self.text(self.settings["keys"][lane].upper(), "mono", color, center=(x + lane_width // 2, line_y + 30))
@@ -756,7 +780,7 @@ class AutoBeatApp:
                 x = left + note.lane * lane_width + 7
                 cap_width = lane_width - 14
                 cap_height = 18
-                lane_color = LANE_COLORS[note.lane]
+                lane_color = self.lane_colors[note.lane]
                 if note.kind.value == "hold" and note.end_time is not None:
                     end_y = line_y - (note.end_time - now) * speed
                     # 始点または終点のどちらかが見えている間は描画を続ける。
@@ -907,6 +931,7 @@ class AutoBeatApp:
             ("判定幅 PERFECT", f"{windows['perfect']} ms"),
             ("判定幅 GREAT", f"{windows['great']} ms"),
             ("判定幅 GOOD", f"{windows['good']} ms"),
+            ("ノーツ配色", self.note_theme_label),
             ("フルスクリーン", "ON" if self.settings["fullscreen"] else "OFF"),
             ("解像度", f"{self.settings['resolution'][0]} x {self.settings['resolution'][1]}"),
             ("入力タイミング測定", "ENTER"),
@@ -914,10 +939,10 @@ class AutoBeatApp:
 
     def draw_settings(self) -> None:
         width, height = self.size
-        self.heading("SETTINGS", "↑↓で項目選択、←→で変更。ENTERで入力タイミングを測定できます")
-        self.panel(pygame.Rect(width // 2 - 390, 135, 780, 475))
+        self.heading("SETTINGS", "↑↓で項目選択、←→で変更。ノーツ配色はENTERでも切替、入力タイミング測定はENTERで開始")
+        self.panel(pygame.Rect(width // 2 - 390, 135, 780, 482))
         for index, (name, value) in enumerate(self._settings_rows()):
-            y = 150 + index * 32
+            y = 145 + index * 31
             rect = pygame.Rect(width // 2 - 360, y, 720, 30)
             selected = index == self.settings_selection
             if selected:
@@ -926,9 +951,9 @@ class AutoBeatApp:
             self.text(name, "small" if index >= 4 else "body", pos=(rect.left + 16, rect.top + (6 if index >= 4 else 3)))
             self.text(value, "mono", CYAN if selected else WHITE, pos=(rect.left + 470, rect.top + 5))
             self.buttons.append((rect, lambda selected_index=index: setattr(self, "settings_selection", selected_index)))
-        self.text("KEY CONFIG", "body", YELLOW, pos=(width // 2 - 360, 475))
+        self.text("KEY CONFIG", "body", YELLOW, pos=(width // 2 - 360, 498))
         for lane, name in enumerate(LANE_NAMES):
-            y = 510 + (lane // 3) * 42
+            y = 532 + (lane // 3) * 40
             x = width // 2 - 360 + (lane % 3) * 240
             rect = pygame.Rect(x, y, 215, 32)
             self.panel(rect, (52, 46, 73) if self.key_capture_lane == lane else PANEL_DARK, 8)
@@ -999,9 +1024,14 @@ class AutoBeatApp:
         elif index == 6:
             windows["good"] = max(windows["great"] + 5, min(250, int(windows["good"]) + 5 * direction))
         elif index == 7:
+            themes = list(NOTE_THEMES)
+            current_theme = self.note_theme_key
+            current_index = themes.index(current_theme)
+            self.settings["note_theme"] = themes[(current_index + direction) % len(themes)]
+        elif index == 8:
             self.settings["fullscreen"] = not self.settings["fullscreen"]
             self._apply_display_settings()
-        elif index == 8:
+        elif index == 9:
             current = tuple(self.settings["resolution"])
             try:
                 resolution_index = RESOLUTION_PRESETS.index(current)
@@ -1112,7 +1142,7 @@ class AutoBeatApp:
                 self.adjust_setting(1)
             elif event.key in (pygame.K_RETURN, pygame.K_SPACE) and self.settings_selection == 7:
                 self.adjust_setting(1)
-            elif event.key in (pygame.K_RETURN, pygame.K_SPACE) and self.settings_selection == 9:
+            elif event.key in (pygame.K_RETURN, pygame.K_SPACE) and self.settings_selection == 10:
                 self.begin_calibration()
             elif event.key == pygame.K_ESCAPE:
                 self.persist_settings()

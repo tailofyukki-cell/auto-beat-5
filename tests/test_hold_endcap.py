@@ -13,7 +13,7 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import pygame
-from app import AutoBeatApp, LANE_COLORS
+from app import AutoBeatApp
 from gameplay import GameSession, JudgmentWindows
 from models import Chart, Difficulty, Note, NoteType
 
@@ -41,14 +41,15 @@ class HoldEndCapTest(unittest.TestCase):
         pygame.quit()
         self.directory.cleanup()
 
-    def test_hold_end_draws_regular_note_sized_cap(self) -> None:
+    def test_hold_end_draws_regular_note_sized_cap_in_selected_theme_color(self) -> None:
+        self.app.settings["note_theme"] = "pastel"
         self.app.draw()
 
         left, _field_width, lane_width, _field_top, line_y = self.app._game_field_geometry()
         end_y = int(line_y - (3.0 - 2.7) * float(self.app.settings["note_speed"]))
         cap_center_x = left + 2 * lane_width + lane_width // 2
         pixel = self.app.surface.get_at((cap_center_x, end_y))[:3]
-        self.assertEqual(pixel, LANE_COLORS[2])
+        self.assertEqual(pixel, self.app.lane_colors[2])
 
 
 if __name__ == "__main__":

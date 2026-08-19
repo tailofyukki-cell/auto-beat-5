@@ -59,6 +59,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "music_volume": 0.8,
     "sfx_volume": 0.7,
     "note_speed": 625.0,
+    "note_theme": "standard",
     "timing_offset_ms": 0,
     "fullscreen": False,
     "resolution": [1280, 720],

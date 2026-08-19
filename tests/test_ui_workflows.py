@@ -16,7 +16,7 @@ from app import AutoBeatApp
 from chart_generator import ChartGenerator
 from gameplay import GameSession, JudgmentWindows
 from models import AnalysisResult, Chart, Difficulty, Note
-from persistence import save_chart
+from persistence import load_settings, save_chart
 
 
 class UiWorkflowTest(unittest.TestCase):
@@ -54,6 +54,18 @@ class UiWorkflowTest(unittest.TestCase):
         original_good = self.app.settings["judgment_windows_ms"]["good"]
         self.app.adjust_setting(1)
         self.assertGreater(self.app.settings["judgment_windows_ms"]["good"], original_good)
+        self.app.screen = "settings"
+        self.app.draw()
+
+    def test_note_theme_cycles_persists_and_settings_screen_draws(self) -> None:
+        self.assertEqual(self.app.note_theme_key, "standard")
+        self.app.settings_selection = 7
+        self.app.adjust_setting(1)
+        self.assertEqual(self.app.note_theme_key, "neon")
+        self.assertEqual(self.app.note_theme_label, "NEON")
+        self.assertEqual(self.app.lane_colors[0], (0, 236, 255))
+        self.app.persist_settings()
+        self.assertEqual(load_settings(self.app.paths)["note_theme"], "neon")
         self.app.screen = "settings"
         self.app.draw()
 
