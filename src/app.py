@@ -14,6 +14,7 @@ import pygame
 
 from analyzer import AnalysisProgress, AnalysisWorker, MusicAnalyzer
 from audio_clock import AudioClock, AudioClockError
+from calibration import CalibrationSession
 from chart_generator import ChartGenerator
 from chart_validator import ChartValidator
 from gameplay import GameSession, JudgmentWindows
@@ -115,9 +116,9 @@ class AutoBeatApp:
         self.selected_reward: RewardImage | None = None
         self.combo_banner = ""
         self.combo_banner_until = 0.0
-        self.combo_milestones_seen: set[int] = set()
         self.hit_effects: list[HitEffect] = []
         self.countdown_started_at: float | None = None
+        self.calibration: CalibrationSession | None = None
         self.start_banner_until = 0.0
         self.feedback_sounds = self._build_feedback_sounds()
         self._set_sfx_volume()
@@ -291,14 +292,12 @@ class AutoBeatApp:
         self._check_combo_milestone()
 
     def _check_combo_milestone(self) -> None:
+        """現在の連続コンボが節目へ到達した瞬間に、毎回バナーを表示する。"""
         if not self.session:
             return
-        for milestone in COMBO_MILESTONES:
-            if self.session.combo >= milestone and milestone not in self.combo_milestones_seen:
-                self.combo_milestones_seen.add(milestone)
-                self.combo_banner = f"{milestone} COMBO!"
-                self.combo_banner_until = time.perf_counter() + 1.8
-                break
+        if self.session.combo in COMBO_MILESTONES:
+            self.combo_banner = f"{self.session.combo} COMBO!"
+            self.combo_banner_until = time.perf_counter() + 1.8
 
     def choose_file(self) -> None:
         try:
@@ -419,7 +418,6 @@ class AutoBeatApp:
                 windows,
                 timing_offset=float(self.settings.get("timing_offset_ms", 0)) / 1000.0,
             )
-            self.combo_milestones_seen = set()
             self.combo_banner = ""
             self.hit_effects = []
             self.countdown_started_at = time.perf_counter()
@@ -429,6 +427,38 @@ class AutoBeatApp:
         except AudioClockError as error:
             self.error = str(error)
             self.screen = "difficulty"
+
+    def begin_calibration(self) -> None:
+        """0.5秒間隔のクリックに合わせた入力でTiming Offsetを測定する。"""
+        if not self.audio_available or not self.feedback_sounds:
+            self.error = "効果音を初期化できないため、入力タイミングを測定できません。"
+            return
+        self.calibration = CalibrationSession(started_at=time.perf_counter() + 0.8)
+        self.message = ""
+        self.error = ""
+        self.set_screen("calibration")
+
+    def update_calibration(self) -> None:
+        if self.screen != "calibration" or self.calibration is None:
+            return
+        sound = self.feedback_sounds.get(Judgment.PERFECT)
+        if sound is None:
+            return
+        for _beat in self.calibration.due_clicks(time.perf_counter()):
+            sound.play()
+
+    def apply_calibration(self) -> None:
+        if not self.calibration:
+            return
+        recommendation = self.calibration.recommendation_ms
+        if recommendation is None:
+            self.error = "少なくとも5回入力してから適用してください。"
+            return
+        self.settings["timing_offset_ms"] = recommendation
+        self.persist_settings()
+        self.message = f"Timing Offset を {recommendation:+d} ms に設定しました。"
+        self.calibration = None
+        self.set_screen("settings")
 
     def finish_game(self) -> None:
         if not self.session or not self.chart:
@@ -701,14 +731,15 @@ class AutoBeatApp:
             ("判定幅 GOOD", f"{windows['good']} ms"),
             ("フルスクリーン", "ON" if self.settings["fullscreen"] else "OFF"),
             ("解像度", f"{self.settings['resolution'][0]} x {self.settings['resolution'][1]}"),
+            ("入力タイミング測定", "ENTER"),
         ]
 
     def draw_settings(self) -> None:
         width, height = self.size
-        self.heading("SETTINGS", "↑↓で項目選択、←→で変更。キーコンフィグは枠を選択後、任意のキーを押してください")
+        self.heading("SETTINGS", "↑↓で項目選択、←→で変更。ENTERで入力タイミングを測定できます")
         self.panel(pygame.Rect(width // 2 - 390, 135, 780, 475))
         for index, (name, value) in enumerate(self._settings_rows()):
-            y = 150 + index * 34
+            y = 150 + index * 32
             rect = pygame.Rect(width // 2 - 360, y, 720, 30)
             selected = index == self.settings_selection
             if selected:
@@ -717,9 +748,9 @@ class AutoBeatApp:
             self.text(name, "small" if index >= 4 else "body", pos=(rect.left + 16, rect.top + (6 if index >= 4 else 3)))
             self.text(value, "mono", CYAN if selected else WHITE, pos=(rect.left + 470, rect.top + 5))
             self.buttons.append((rect, lambda selected_index=index: setattr(self, "settings_selection", selected_index)))
-        self.text("KEY CONFIG", "body", YELLOW, pos=(width // 2 - 360, 465))
+        self.text("KEY CONFIG", "body", YELLOW, pos=(width // 2 - 360, 475))
         for lane, name in enumerate(LANE_NAMES):
-            y = 500 + (lane // 3) * 42
+            y = 510 + (lane // 3) * 42
             x = width // 2 - 360 + (lane % 3) * 240
             rect = pygame.Rect(x, y, 215, 32)
             self.panel(rect, (52, 46, 73) if self.key_capture_lane == lane else PANEL_DARK, 8)
@@ -727,6 +758,40 @@ class AutoBeatApp:
             self.buttons.append((rect, lambda selected=lane: setattr(self, "key_capture_lane", selected)))
         self.button("設定を保存", pygame.Rect(width // 2 - 175, 625, 350, 42), self.persist_settings, accent=GREEN)
         self.button("タイトルへ", pygame.Rect(45, height - 65, 150, 40), lambda: self.set_screen("title"), accent=MUTED)
+
+    def draw_calibration(self) -> None:
+        width, height = self.size
+        calibration = self.calibration
+        if calibration is None:
+            self.set_screen("settings")
+            return
+        self.heading("INPUT TIMING CALIBRATION", "クリック音に合わせて SPACE を押してください。人の反応のばらつきは中央値でならします")
+        self.panel(pygame.Rect(width // 2 - 390, 145, 780, 425), PANEL, 16)
+        now = time.perf_counter()
+        elapsed = max(0.0, now - calibration.started_at)
+        current_phase = elapsed % calibration.interval_seconds if now >= calibration.started_at else 0.0
+        pulse = 0.45 + 0.55 * (1.0 - min(1.0, current_phase / calibration.interval_seconds))
+        radius = int(48 + 24 * pulse)
+        pygame.draw.circle(self.surface, (38, 61, 91), (width // 2, 265), radius + 10)
+        pygame.draw.circle(self.surface, CYAN, (width // 2, 265), radius, width=4)
+        self.text("CLICK", "h1", CYAN, center=(width // 2, 265))
+        self.text("SPACE", "body", WHITE, center=(width // 2, 340))
+        for index in range(calibration.sample_target):
+            x = width // 2 - 180 + index * 40
+            color = GREEN if index < len(calibration.offsets_ms) else (59, 74, 103)
+            pygame.draw.circle(self.surface, color, (x, 395), 11)
+        self.text(f"入力: {len(calibration.offsets_ms)} / {calibration.sample_target}", "body", center=(width // 2, 430))
+        latest = calibration.latest_offset_ms
+        if latest is not None:
+            self.text(f"直近のずれ: {latest:+d} ms", "small", MUTED, center=(width // 2, 462))
+        recommendation = calibration.recommendation_ms
+        if recommendation is None:
+            self.text("最初の2回はリズムに慣れるためのウォームアップです。", "small", MUTED, center=(width // 2, 502))
+            self.text("ESC: 設定へ戻る", "small", MUTED, center=(width // 2, height - 78))
+        else:
+            self.panel(pygame.Rect(width // 2 - 260, 485, 520, 54), (34, 67, 75), 10)
+            self.text(f"推奨 Timing Offset: {recommendation:+d} ms", "body", GREEN, center=(width // 2, 512))
+            self.text("A または ENTER: 適用    R: やり直す    ESC: 設定へ戻る", "small", WHITE, center=(width // 2, height - 78))
 
     def _apply_display_settings(self) -> None:
         width, height = self.settings["resolution"]
@@ -805,8 +870,9 @@ class AutoBeatApp:
             "gallery": self.draw_gallery,
             "gallery_preview": self.draw_gallery_preview,
             "settings": self.draw_settings,
+            "calibration": self.draw_calibration,
         }[self.screen]()
-        if self.screen not in {"title", "game"}:
+        if self.screen not in {"title", "game", "calibration"}:
             self.draw_overlay()
         pygame.display.flip()
 
@@ -847,9 +913,23 @@ class AutoBeatApp:
                 self.adjust_setting(1)
             elif event.key in (pygame.K_RETURN, pygame.K_SPACE) and self.settings_selection == 7:
                 self.adjust_setting(1)
+            elif event.key in (pygame.K_RETURN, pygame.K_SPACE) and self.settings_selection == 9:
+                self.begin_calibration()
             elif event.key == pygame.K_ESCAPE:
                 self.persist_settings()
                 self.set_screen("title")
+        elif self.screen == "calibration":
+            if event.key == pygame.K_ESCAPE:
+                self.calibration = None
+                self.set_screen("settings")
+            elif self.calibration and self.calibration.recommendation_ms is not None and event.key in (pygame.K_a, pygame.K_RETURN):
+                self.apply_calibration()
+            elif event.key == pygame.K_r:
+                self.begin_calibration()
+            elif event.key == pygame.K_SPACE and self.calibration:
+                offset = self.calibration.record_press(time.perf_counter())
+                if offset is not None:
+                    self.message = f"入力を記録しました: {offset:+.0f} ms"
         elif self.screen == "gallery":
             if event.key == pygame.K_LEFT:
                 self.gallery_page = max(0, self.gallery_page - 1)
@@ -930,6 +1010,7 @@ class AutoBeatApp:
                     self.key_event(event)
                 elif event.type == pygame.KEYUP:
                     self.key_up_event(event)
+            self.update_calibration()
             self.update_game()
             self.draw()
             self.clock.tick(120)
