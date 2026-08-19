@@ -16,6 +16,7 @@ from analyzer import AnalysisProgress, AnalysisWorker, MusicAnalyzer
 from audio_clock import AudioClock, AudioClockError
 from calibration import CalibrationSession
 from chart_generator import ChartGenerator
+from chart_summary import build_chart_summary
 from chart_validator import ChartValidator
 from gameplay import GameSession, JudgmentWindows
 from models import Chart, Difficulty, Judgment, LANE_NAMES
@@ -385,23 +386,43 @@ class AutoBeatApp:
                 self.screen = "difficulty"
                 return
 
+    def _generate_chart(self, difficulty: Difficulty, *, variant: int) -> Chart:
+        """解析済み楽曲から指定variantの譜面を生成し、検証後にキャッシュを置換する。"""
+        if not self.analysis:
+            raise RuntimeError("解析結果がありません。")
+        chart = ChartGenerator().generate(self.analysis, difficulty, variant=variant)
+        report = ChartValidator().validate(chart)
+        chart.metadata["validation_removed"] = report.removed_notes
+        chart.metadata["validation_issues"] = report.issues[:20]
+        save_chart(self.paths, chart)
+        return chart
+
     def select_chart(self, difficulty: Difficulty) -> None:
+        """譜面を用意して概要画面へ進む。プレイ開始はユーザー確認後に行う。"""
         if not self.analysis:
             self.error = "解析結果がありません。"
             self.screen = "select"
             return
+        self.selected_difficulty = list(Difficulty).index(difficulty)
         chart = load_chart(self.paths, self.analysis.music_hash, difficulty.value)
         if chart is None or chart.generator_version != ChartGenerator.VERSION:
-            chart = ChartGenerator().generate(self.analysis, difficulty)
-            report = ChartValidator().validate(chart)
-            chart.metadata["validation_removed"] = report.removed_notes
-            chart.metadata["validation_issues"] = report.issues[:20]
-            save_chart(self.paths, chart)
+            chart = self._generate_chart(difficulty, variant=0)
             self.message = f"{difficulty.label}譜面を生成しました（{len(chart.notes)}ノーツ）。"
         else:
             self.message = f"{difficulty.label}譜面キャッシュを読み込みました。"
         self.chart = chart
-        self.start_game()
+        self.screen = "chart_summary"
+
+    def regenerate_chart(self) -> None:
+        """現在の難易度で次の決定論的variantを生成し、既存キャッシュを安全に更新する。"""
+        if not self.analysis or not self.chart:
+            self.error = "再生成する譜面がありません。"
+            self.screen = "difficulty"
+            return
+        previous_variant = int(self.chart.metadata.get("generation_variant", 0))
+        self.chart = self._generate_chart(self.chart.difficulty, variant=previous_variant + 1)
+        self.message = f"{self.chart.difficulty.label}譜面を再生成しました（variant {previous_variant + 2}）。"
+        self.screen = "chart_summary"
 
     def start_game(self) -> None:
         if not self.chart or not self.analysis or not self.song_path:
@@ -568,6 +589,46 @@ class AutoBeatApp:
             self.buttons.append((rect, lambda i=index: setattr(self, "selected_difficulty", i)))
         self.button("この難易度でプレイ", pygame.Rect(width // 2 - 190, height - 100, 380, 48), lambda: self.select_chart(difficulties[self.selected_difficulty]), accent=GREEN)
         self.button("楽曲選択へ", pygame.Rect(50, height - 72, 150, 40), lambda: self.set_screen("select"), accent=MUTED)
+
+    def draw_chart_summary(self) -> None:
+        if not self.analysis or not self.chart:
+            self.set_screen("difficulty")
+            return
+        width, height = self.size
+        summary = build_chart_summary(self.chart, self.analysis)
+        variant = int(self.chart.metadata.get("generation_variant", 0)) + 1
+        self.heading("譜面概要", f"{summary.difficulty_label}  ・  生成候補 {variant}  ・  プレイ前に内容を確認できます")
+        left_panel = pygame.Rect(95, 150, 485, 370)
+        right_panel = pygame.Rect(width - 580, 150, 485, 370)
+        self.panel(left_panel)
+        self.panel(right_panel)
+        self.text("楽曲解析", "body", CYAN, pos=(left_panel.left + 28, left_panel.top + 26))
+        analysis_rows = [
+            ("推定 BPM", f"{summary.bpm:.1f}"),
+            ("楽曲長", f"{summary.duration_seconds:.1f} 秒"),
+            ("最初の入力", summary.first_note_text),
+            ("譜面傾向", summary.tendency),
+        ]
+        for index, (label, value) in enumerate(analysis_rows):
+            y = left_panel.top + 78 + index * 61
+            self.text(label, "small", MUTED, pos=(left_panel.left + 30, y))
+            self.text(value, "body" if index < 3 else "small", WHITE, pos=(left_panel.left + 180, y - 4))
+        self.text("譜面構成", "body", GREEN, pos=(right_panel.left + 28, right_panel.top + 26))
+        chart_rows = [
+            ("総ノーツ", f"{summary.total_notes}"),
+            ("TAP / HOLD", f"{summary.tap_notes} / {summary.hold_notes}"),
+            ("平均密度", f"{summary.notes_per_second:.2f} NPS  ({summary.notes_per_minute} / min)"),
+            ("最大密度", f"{summary.peak_notes_per_second} notes / sec"),
+            ("同時押し", f"{summary.chord_events} 回  (最大 {summary.max_chord_size} 個)"),
+            ("安全補正", f"{summary.validation_removed} ノーツ除去 / {summary.validation_issues} 注意"),
+        ]
+        for index, (label, value) in enumerate(chart_rows):
+            y = right_panel.top + 72 + index * 43
+            self.text(label, "small", MUTED, pos=(right_panel.left + 30, y))
+            self.text(value, "small", WHITE, pos=(right_panel.left + 170, y))
+        self.button("この譜面でプレイ  [ENTER]", pygame.Rect(width // 2 - 300, height - 122, 290, 50), self.start_game, accent=GREEN)
+        self.button("もう一度生成  [R]", pygame.Rect(width // 2 + 10, height - 122, 290, 50), self.regenerate_chart, accent=YELLOW)
+        self.button("難易度選択へ  [ESC]", pygame.Rect(45, height - 70, 190, 40), lambda: self.set_screen("difficulty"), accent=MUTED)
 
     def draw_game(self) -> None:
         if not self.session or not self.chart:
@@ -864,6 +925,7 @@ class AutoBeatApp:
             "select": self.draw_select,
             "analyzing": self.draw_analyzing,
             "difficulty": self.draw_difficulty,
+            "chart_summary": self.draw_chart_summary,
             "game": self.draw_game,
             "result": self.draw_result,
             "unlock": self.draw_unlock,
@@ -902,6 +964,13 @@ class AutoBeatApp:
                 self.select_chart(list(Difficulty)[self.selected_difficulty])
             elif event.key == pygame.K_ESCAPE:
                 self.set_screen("select")
+        elif self.screen == "chart_summary":
+            if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                self.start_game()
+            elif event.key == pygame.K_r:
+                self.regenerate_chart()
+            elif event.key == pygame.K_ESCAPE:
+                self.set_screen("difficulty")
         elif self.screen == "settings":
             if event.key == pygame.K_UP:
                 self.settings_selection = (self.settings_selection - 1) % len(self._settings_rows())

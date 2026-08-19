@@ -38,9 +38,11 @@ RULES: dict[Difficulty, DifficultyRule] = {
 class ChartGenerator:
     VERSION = "1.3"
 
-    def generate(self, analysis: AnalysisResult, difficulty: Difficulty) -> Chart:
+    def generate(self, analysis: AnalysisResult, difficulty: Difficulty, *, variant: int = 0) -> Chart:
+        """同じvariantでは再現可能に、variantを変えると別のレーン候補を生成する。"""
         rule = RULES[difficulty]
-        seed = int(hashlib.sha256(f"{analysis.music_hash}:{difficulty.value}".encode()).hexdigest()[:16], 16)
+        variant = max(0, int(variant))
+        seed = int(hashlib.sha256(f"{analysis.music_hash}:{difficulty.value}:{variant}".encode()).hexdigest()[:16], 16)
         notes: list[Note] = []
         candidates = self._select_candidates(analysis, rule)
         last_by_lane = [-inf] * 5
@@ -54,7 +56,7 @@ class ChartGenerator:
             strength = self._at(analysis.onset_strengths, index, 0.0)
             percussion = self._at(analysis.percussive_strengths, index, 0.0)
             downbeat = self._near_downbeat(time, analysis.downbeats)
-            lanes = self._assign_lanes(bands, strength, percussion, previous_lane, rule, downbeat)
+            lanes = self._assign_lanes(bands, strength, percussion, previous_lane, rule, downbeat, variant)
             lanes = [lane for lane in lanes if time - last_by_lane[lane] >= rule.min_gap]
             if not lanes:
                 continue
@@ -87,6 +89,7 @@ class ChartGenerator:
                 "start_lead_in_seconds": START_LEAD_IN_SECONDS,
                 "downbeats": len(analysis.downbeats),
                 "local_tempo_points": len(analysis.local_bpms),
+                "generation_variant": variant,
             },
         )
         chart.sort()
@@ -162,6 +165,7 @@ class ChartGenerator:
         previous_lane: int,
         rule: DifficultyRule,
         downbeat: bool,
+        variant: int = 0,
     ) -> list[int]:
         ranked = sorted(range(5), key=lambda lane: bands[lane], reverse=True)
         primary = ranked[0]
@@ -176,6 +180,14 @@ class ChartGenerator:
             primary = 3 if previous_lane != 3 else 4
         elif primary == 4:
             primary = 4 if previous_lane != 4 else 3
+
+        # 再生成は音価・タイミングを保ち、左右レーンの選択だけを決定論的に切り替える。
+        # 中央レーンは強拍のアンカーとして固定し、譜面の読みやすさを損なわない。
+        if variant % 2:
+            if primary in (0, 1):
+                primary = 1 - primary
+            elif primary in (3, 4):
+                primary = 7 - primary
 
         lanes = [primary]
         if rule.allow_chords:
