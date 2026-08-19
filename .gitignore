@@ -1,0 +1,33 @@
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Build and release artifacts (share dist/ separately as a ZIP when needed)
+build/
+dist/
+*.spec.bak
+*.exe
+*.msi
+*.zip
+
+# Runtime data generated from the player's own music
+cache/
+charts/
+userdata/
+artifacts/
+
+# Local configuration, diagnostics, and secrets
+.env
+.env.*
+!.env.example
+*.log
+*.sqlite
+*.db
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

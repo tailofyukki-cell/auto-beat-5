@@ -1,0 +1,14 @@
+{
+  "reward_001.png": {
+    "required_score": 100000
+  },
+  "reward_002.png": {
+    "required_score": 300000
+  },
+  "reward_003.webp": {
+    "required_score": 500000
+  },
+  "reward_004.jpg": {
+    "required_score": 1000000
+  }
+}
