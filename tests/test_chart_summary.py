@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import pygame
 from app import AutoBeatApp
 from chart_summary import build_chart_summary
+from gameplay import GameSession, JudgmentWindows
 from models import AnalysisResult, Chart, Difficulty, Note, NoteType
 from persistence import load_chart
 
@@ -85,7 +86,7 @@ class ChartSummaryWorkflowTest(unittest.TestCase):
         self.assertIsNone(self.app.session)
         self.app.draw()
 
-    def test_regenerate_replaces_same_difficulty_cache_with_next_variant(self) -> None:
+    def test_regenerate_keeps_committed_cache_until_candidate_is_adopted(self) -> None:
         self.app.select_chart(Difficulty.EASY)
         first_chart = self.app.chart
         self.assertIsNotNone(first_chart)
@@ -95,11 +96,39 @@ class ChartSummaryWorkflowTest(unittest.TestCase):
         self.app.regenerate_chart()
 
         self.assertEqual(self.app.screen, "chart_summary")
+        self.assertTrue(self.app.chart_is_pending)
         self.assertEqual(int(self.app.chart.metadata["generation_variant"]), first_variant + 1)
         self.assertNotEqual([note.lane for note in self.app.chart.notes], first_lanes)
         cached = load_chart(self.app.paths, self.app.analysis.music_hash, Difficulty.EASY.value)
         self.assertIsNotNone(cached)
-        self.assertEqual(int(cached.metadata["generation_variant"]), first_variant + 1)
+        self.assertEqual(int(cached.metadata["generation_variant"]), first_variant)
+
+        self.app.discard_pending_chart()
+        self.assertFalse(self.app.chart_is_pending)
+        self.assertEqual(int(self.app.chart.metadata["generation_variant"]), first_variant)
+
+        self.app.regenerate_chart()
+        candidate_variant = int(self.app.chart.metadata["generation_variant"])
+        self.app.adopt_pending_chart()
+        adopted = load_chart(self.app.paths, self.app.analysis.music_hash, Difficulty.EASY.value)
+        self.assertIsNotNone(adopted)
+        self.assertEqual(int(adopted.metadata["generation_variant"]), candidate_variant)
+        self.assertFalse(self.app.chart_is_pending)
+
+    def test_trial_result_allows_explicit_candidate_adoption(self) -> None:
+        self.app.select_chart(Difficulty.NORMAL)
+        self.app.regenerate_chart()
+        candidate_variant = int(self.app.chart.metadata["generation_variant"])
+        self.app.session = GameSession(self.app.chart, JudgmentWindows.from_ms(self.app.settings["judgment_windows_ms"]))
+        self.app.finish_game()
+
+        self.assertEqual(self.app.screen, "result")
+        self.assertTrue(self.app.chart_is_pending)
+        self.app.adopt_pending_chart()
+        self.assertEqual(self.app.screen, "chart_summary")
+        self.assertFalse(self.app.chart_is_pending)
+        adopted = load_chart(self.app.paths, self.app.analysis.music_hash, Difficulty.NORMAL.value)
+        self.assertEqual(int(adopted.metadata["generation_variant"]), candidate_variant)
 
 
 if __name__ == "__main__":

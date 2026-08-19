@@ -107,6 +107,9 @@ class AutoBeatApp:
         self.song_path: Path | None = None
         self.analysis = None
         self.chart: Chart | None = None
+        # committed_chart はディスクへ保存済みの確定譜面、pending_chart は未保存の試作候補。
+        self.committed_chart: Chart | None = None
+        self.pending_chart: Chart | None = None
         self.worker: AnalysisWorker | None = None
         self.progress = AnalysisProgress(0, "")
         self.selected_difficulty = 0
@@ -322,6 +325,8 @@ class AutoBeatApp:
             self.song_path = Path(selected)
             self.analysis = None
             self.chart = None
+            self.committed_chart = None
+            self.pending_chart = None
             self.error = ""
             self.begin_analysis()
 
@@ -340,6 +345,8 @@ class AutoBeatApp:
             self.message = "音源が更新されているため、再解析します。"
         self.analysis = None
         self.chart = None
+        self.committed_chart = None
+        self.pending_chart = None
         self.begin_analysis()
 
     def begin_analysis(self) -> None:
@@ -388,15 +395,16 @@ class AutoBeatApp:
                 self.screen = "difficulty"
                 return
 
-    def _generate_chart(self, difficulty: Difficulty, *, variant: int) -> Chart:
-        """解析済み楽曲から指定variantの譜面を生成し、検証後にキャッシュを置換する。"""
+    def _generate_chart(self, difficulty: Difficulty, *, variant: int, persist: bool = True) -> Chart:
+        """解析済み楽曲から指定variantの譜面を生成する。試作候補は明示採用まで保存しない。"""
         if not self.analysis:
             raise RuntimeError("解析結果がありません。")
         chart = ChartGenerator().generate(self.analysis, difficulty, variant=variant)
         report = ChartValidator().validate(chart)
         chart.metadata["validation_removed"] = report.removed_notes
         chart.metadata["validation_issues"] = report.issues[:20]
-        save_chart(self.paths, chart)
+        if persist:
+            save_chart(self.paths, chart)
         return chart
 
     def select_chart(self, difficulty: Difficulty) -> None:
@@ -413,18 +421,47 @@ class AutoBeatApp:
         else:
             self.message = f"{difficulty.label}譜面キャッシュを読み込みました。"
         self.chart = chart
+        self.committed_chart = chart
+        self.pending_chart = None
         self.screen = "chart_summary"
 
+    @property
+    def chart_is_pending(self) -> bool:
+        return self.pending_chart is not None and self.chart is self.pending_chart
+
     def regenerate_chart(self) -> None:
-        """現在の難易度で次の決定論的variantを生成し、既存キャッシュを安全に更新する。"""
+        """確定済み譜面を残したまま、次の決定論的variantを未保存の試作候補として生成する。"""
         if not self.analysis or not self.chart:
             self.error = "再生成する譜面がありません。"
             self.screen = "difficulty"
             return
-        previous_variant = int(self.chart.metadata.get("generation_variant", 0))
-        self.chart = self._generate_chart(self.chart.difficulty, variant=previous_variant + 1)
-        self.message = f"{self.chart.difficulty.label}譜面を再生成しました（variant {previous_variant + 2}）。"
+        base_chart = self.pending_chart or self.committed_chart or self.chart
+        previous_variant = int(base_chart.metadata.get("generation_variant", 0))
+        self.pending_chart = self._generate_chart(base_chart.difficulty, variant=previous_variant + 1, persist=False)
+        self.chart = self.pending_chart
+        self.message = f"{self.chart.difficulty.label}の試作候補を生成しました。プレイ後に採用を選べます。"
         self.screen = "chart_summary"
+
+    def adopt_pending_chart(self) -> None:
+        """試遊済み候補を、この曲・難易度の確定キャッシュとして保存する。"""
+        if self.pending_chart is None:
+            return
+        save_chart(self.paths, self.pending_chart)
+        self.committed_chart = self.pending_chart
+        self.chart = self.pending_chart
+        self.pending_chart = None
+        self.message = "試作候補を採用して保存しました。"
+        self.set_screen("chart_summary")
+
+    def discard_pending_chart(self) -> None:
+        """未保存の試作候補を破棄し、以前の確定譜面へ戻す。"""
+        if self.pending_chart is None:
+            return
+        self.pending_chart = None
+        if self.committed_chart is not None:
+            self.chart = self.committed_chart
+        self.message = "試作候補を破棄し、以前の譜面を残しました。"
+        self.set_screen("chart_summary")
 
     def start_game(self) -> None:
         if not self.chart or not self.analysis or not self.song_path:
@@ -628,7 +665,8 @@ class AutoBeatApp:
         width, height = self.size
         summary = build_chart_summary(self.chart, self.analysis)
         variant = int(self.chart.metadata.get("generation_variant", 0)) + 1
-        self.heading("譜面概要", f"{summary.difficulty_label}  ・  生成候補 {variant}  ・  プレイ前に内容を確認できます")
+        state_label = "試作候補（未保存）" if self.chart_is_pending else "確定譜面"
+        self.heading("譜面概要", f"{summary.difficulty_label}  ・  {state_label}  ・  生成候補 {variant}")
         left_panel = pygame.Rect(95, 150, 485, 370)
         right_panel = pygame.Rect(width - 580, 150, 485, 370)
         self.panel(left_panel)
@@ -658,9 +696,12 @@ class AutoBeatApp:
             y = right_panel.top + 72 + index * 43
             self.text(label, "small", MUTED, pos=(right_panel.left + 30, y))
             self.text(value, "small", WHITE, pos=(right_panel.left + 170, y))
-        self.button("この譜面でプレイ  [ENTER]", pygame.Rect(width // 2 - 300, height - 122, 290, 50), self.start_game, accent=GREEN)
-        self.button("もう一度生成  [R]", pygame.Rect(width // 2 + 10, height - 122, 290, 50), self.regenerate_chart, accent=YELLOW)
-        self.button("ランキング  [L]", pygame.Rect(width // 2 - 130, height - 66, 260, 38), self.open_ranking, accent=MAGENTA)
+        self.button("この候補でプレイ  [ENTER]" if self.chart_is_pending else "この譜面でプレイ  [ENTER]", pygame.Rect(width // 2 - 300, height - 122, 290, 50), self.start_game, accent=GREEN)
+        self.button("新しい候補を生成  [R]", pygame.Rect(width // 2 + 10, height - 122, 290, 50), self.regenerate_chart, accent=YELLOW)
+        if self.chart_is_pending:
+            self.button("以前の譜面に戻す  [D]", pygame.Rect(width // 2 - 130, height - 66, 260, 38), self.discard_pending_chart, accent=MAGENTA)
+        else:
+            self.button("ランキング  [L]", pygame.Rect(width // 2 - 130, height - 66, 260, 38), self.open_ranking, accent=MAGENTA)
         self.button("難易度選択へ  [ESC]", pygame.Rect(45, height - 70, 190, 40), lambda: self.set_screen("difficulty"), accent=MUTED)
 
     def draw_ranking(self) -> None:
@@ -782,9 +823,17 @@ class AutoBeatApp:
             self.panel(pygame.Rect(width // 2 - 320 + index * 165, 380, 150, 78))
             self.text(label, "small", MUTED, center=(width // 2 - 245 + index * 165, 405))
             self.text(str(result.judgments[label]), "h1", center=(width // 2 - 245 + index * 165, 435))
-        self.button("もう一度プレイ", pygame.Rect(width // 2 - 300, height - 125, 190, 48), self.start_game, accent=GREEN)
-        self.button("ランキング", pygame.Rect(width // 2 - 95, height - 125, 190, 48), self.open_ranking, accent=MAGENTA)
-        self.button("タイトルへ", pygame.Rect(width // 2 + 110, height - 125, 190, 48), lambda: self.set_screen("title"), accent=MUTED)
+        if self.chart_is_pending:
+            self.panel(pygame.Rect(width // 2 - 385, height - 190, 770, 46), (44, 61, 92), 10)
+            self.text("試作候補をプレイしました。どちらを残しますか？", "body", YELLOW, center=(width // 2, height - 167))
+            self.button("この候補を採用・保存  [A]", pygame.Rect(width // 2 - 350, height - 132, 335, 42), self.adopt_pending_chart, accent=GREEN)
+            self.button("以前の譜面を残す  [D]", pygame.Rect(width // 2 + 15, height - 132, 335, 42), self.discard_pending_chart, accent=MAGENTA)
+            self.button("候補をもう一度プレイ", pygame.Rect(width // 2 - 230, height - 78, 220, 40), self.start_game, accent=CYAN)
+            self.button("タイトルへ", pygame.Rect(width // 2 + 10, height - 78, 220, 40), lambda: self.set_screen("title"), accent=MUTED)
+        else:
+            self.button("もう一度プレイ", pygame.Rect(width // 2 - 300, height - 125, 190, 48), self.start_game, accent=GREEN)
+            self.button("ランキング", pygame.Rect(width // 2 - 95, height - 125, 190, 48), self.open_ranking, accent=MAGENTA)
+            self.button("タイトルへ", pygame.Rect(width // 2 + 110, height - 125, 190, 48), lambda: self.set_screen("title"), accent=MUTED)
 
     def draw_unlock(self) -> None:
         width, height = self.size
@@ -1038,13 +1087,20 @@ class AutoBeatApp:
                 self.start_game()
             elif event.key == pygame.K_r:
                 self.regenerate_chart()
-            elif event.key == pygame.K_l:
+            elif event.key == pygame.K_d and self.chart_is_pending:
+                self.discard_pending_chart()
+            elif event.key == pygame.K_l and not self.chart_is_pending:
                 self.open_ranking()
             elif event.key == pygame.K_ESCAPE:
                 self.set_screen("difficulty")
         elif self.screen == "ranking":
             if event.key == pygame.K_ESCAPE:
                 self.set_screen("chart_summary")
+        elif self.screen == "result" and self.chart_is_pending:
+            if event.key == pygame.K_a:
+                self.adopt_pending_chart()
+            elif event.key == pygame.K_d:
+                self.discard_pending_chart()
         elif self.screen == "settings":
             if event.key == pygame.K_UP:
                 self.settings_selection = (self.settings_selection - 1) % len(self._settings_rows())
