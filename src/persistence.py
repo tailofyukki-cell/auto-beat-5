@@ -207,6 +207,23 @@ def ranking_entries(profile: dict[str, Any], chart_key: str, *, limit: int = 10)
     return valid[: max(0, int(limit))]
 
 
+def song_ranking_summary(profile: dict[str, Any], music_hash: str) -> dict[str, dict[str, Any]]:
+    """楽曲ハッシュに属する難易度別の自己ベストを返す。別楽曲の記録は混在させない。"""
+    raw_rankings = profile.get("rankings", {})
+    if not isinstance(raw_rankings, dict):
+        return {}
+    prefix = f"{music_hash}:"
+    summary: dict[str, dict[str, Any]] = {}
+    for chart_key, entries in raw_rankings.items():
+        if not isinstance(chart_key, str) or not chart_key.startswith(prefix) or not isinstance(entries, list):
+            continue
+        difficulty = chart_key[len(prefix) :]
+        valid = [dict(entry) for entry in entries if isinstance(entry, dict) and "score" in entry]
+        if valid:
+            summary[difficulty] = valid[0]
+    return summary
+
+
 def record_play(paths: AppPaths, profile: dict[str, Any], *, chart_key: str, result: dict[str, Any]) -> list[str]:
     """プレイ成績・自己ベスト・曲別ローカル順位表を保存し、新しく解放された画像名を返す。"""
     score = int(result["score"])

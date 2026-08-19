@@ -29,6 +29,7 @@ from persistence import (
     music_hash,
     ranking_entries,
     record_play,
+    song_ranking_summary,
     record_recent_song,
     save_analysis,
     save_chart,
@@ -553,6 +554,18 @@ class AutoBeatApp:
         self.button("SETTINGS", pygame.Rect(width // 2 - 160, height // 2 + 110, 320, 46), lambda: self.set_screen("settings"), accent=YELLOW)
         self.text("MP3 / WAV / OGG / FLAC ・ 5 lanes ・ offline", "small", MUTED, center=(width // 2, height - 42))
 
+    def _song_best_text(self, music_hash: str) -> str:
+        """選曲リスト用に、難易度別の自己ベストを横並びの短い表記へ整える。"""
+        summary = song_ranking_summary(self.profile, music_hash)
+        labels: list[str] = []
+        for difficulty in Difficulty:
+            entry = summary.get(difficulty.value)
+            if entry is None:
+                labels.append(f"{difficulty.label[:2]} --")
+            else:
+                labels.append(f"{difficulty.label[:2]} {int(entry.get('score', 0)):,} {entry.get('rank', 'D')}")
+        return "  |  ".join(labels)
+
     def draw_select(self) -> None:
         width, height = self.size
         self.heading("楽曲選択", "ユーザーが利用権限を持つ音楽ファイルを選択してください")
@@ -567,11 +580,13 @@ class AutoBeatApp:
         if recent:
             self.text("RECENT LIBRARY", "body", YELLOW, pos=(125, 365))
             for index, entry in enumerate(recent):
-                rect = pygame.Rect(120, 400 + index * 48, width - 240, 40)
+                rect = pygame.Rect(120, 398 + index * 60, width - 240, 54)
                 self.panel(rect, PANEL_DARK, 7)
                 song_name = Path(str(entry.get("source_path", ""))).name or "不明な楽曲"
-                self.text(song_name, "small", WHITE, pos=(rect.left + 14, rect.top + 10))
-                self.text(f"{float(entry.get('bpm', 0.0)):.1f} BPM   {float(entry.get('duration', 0.0)):.1f} sec", "small", MUTED, pos=(rect.right - 220, rect.top + 10))
+                digest = str(entry.get("music_hash", ""))
+                self.text(song_name, "small", WHITE, pos=(rect.left + 14, rect.top + 7))
+                self.text(f"{float(entry.get('bpm', 0.0)):.1f} BPM   {float(entry.get('duration', 0.0)):.1f} sec", "small", MUTED, pos=(rect.right - 220, rect.top + 7))
+                self.text(f"BEST  {self._song_best_text(digest)}", "small", CYAN if song_ranking_summary(self.profile, digest) else MUTED, pos=(rect.left + 14, rect.top + 29))
                 self.buttons.append((rect, lambda selected_entry=entry: self.load_recent_song(selected_entry)))
         else:
             self.text("解析した楽曲は、ここから再選択できます。", "small", MUTED, center=(width // 2, 425))

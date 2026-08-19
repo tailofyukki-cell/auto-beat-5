@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import pygame
 from app import AutoBeatApp
 from models import Chart, Difficulty, Note
-from persistence import AppPaths, load_profile, ranking_entries, record_play
+from persistence import AppPaths, load_profile, ranking_entries, record_play, song_ranking_summary
 
 
 def result(score: int, accuracy: float, combo: int, rank: str = "A") -> dict[str, object]:
@@ -61,6 +61,18 @@ class RankingPersistenceTest(unittest.TestCase):
         self.assertEqual(records[-1]["score"], 2000)
         self.assertFalse(self.profile["last_play_ranking"]["made_top_ten"])
 
+    def test_song_summary_separates_difficulties_and_other_songs(self) -> None:
+        other_key = "x" * 64 + ":normal"
+        record_play(self.paths, self.profile, chart_key=self.chart_key, result=result(5000, 90.0, 50))
+        record_play(self.paths, self.profile, chart_key="m" * 64 + ":easy", result=result(6000, 91.0, 60))
+        record_play(self.paths, self.profile, chart_key=other_key, result=result(99000, 99.0, 999, "S"))
+
+        summary = song_ranking_summary(self.profile, "m" * 64)
+        self.assertEqual(summary["normal"]["score"], 5000)
+        self.assertEqual(summary["easy"]["score"], 6000)
+        self.assertNotIn("expert", summary)
+        self.assertNotIn("x" * 64 + ":normal", summary)
+
     def test_legacy_profile_without_rankings_remains_usable(self) -> None:
         self.profile.pop("rankings", None)
         record_play(self.paths, self.profile, chart_key=self.chart_key, result=result(5000, 90.0, 50))
@@ -84,6 +96,20 @@ class RankingUiTest(unittest.TestCase):
         self.app.open_ranking()
         self.assertEqual(self.app.screen, "ranking")
         self.assertEqual(self.app.current_ranking()[0]["score"], 12345)
+        self.app.draw()
+
+    def test_select_screen_shows_song_specific_best_summary(self) -> None:
+        self.app.profile["recent_songs"] = [
+            {
+                "music_hash": "m" * 64,
+                "source_path": "C:/music/example.wav",
+                "bpm": 128.0,
+                "duration": 120.0,
+            }
+        ]
+        self.assertIn("12,345", self.app._song_best_text("m" * 64))
+        self.assertIn("--", self.app._song_best_text("z" * 64))
+        self.app.set_screen("select")
         self.app.draw()
 
 
