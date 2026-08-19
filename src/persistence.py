@@ -1,6 +1,7 @@
 """AutoBeat 5 のローカル永続化。破損ファイルは退避して既定値へ戻す。"""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -68,6 +69,8 @@ DEFAULT_PROFILE: dict[str, Any] = {
     "lifetime_score": 0,
     "unlocked_rewards": [],
     "high_scores": {},
+    "rankings": {},
+    "last_play_ranking": {},
     "play_history": [],
     "recent_songs": [],
 }
@@ -95,12 +98,12 @@ def _atomic_write_json(path: Path, data: Any) -> None:
 
 def _load_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
     if not path.exists():
-        return dict(default)
+        return copy.deepcopy(default)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("top level must be object")
-        merged = dict(default)
+        merged = copy.deepcopy(default)
         merged.update(data)
         return merged
     except (OSError, ValueError, json.JSONDecodeError):
@@ -110,7 +113,7 @@ def _load_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
             shutil.move(path, backup)
         except OSError:
             pass
-        return dict(default)
+        return copy.deepcopy(default)
 
 
 def load_settings(paths: AppPaths) -> dict[str, Any]:
@@ -192,12 +195,60 @@ def record_recent_song(paths: AppPaths, profile: dict[str, Any], analysis: Analy
     save_profile(paths, profile)
 
 
+def ranking_entries(profile: dict[str, Any], chart_key: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    """指定曲・難易度のローカル順位表を、安全な表示用データとして返す。"""
+    raw_rankings = profile.get("rankings", {})
+    if not isinstance(raw_rankings, dict):
+        return []
+    entries = raw_rankings.get(chart_key, [])
+    if not isinstance(entries, list):
+        return []
+    valid = [dict(entry) for entry in entries if isinstance(entry, dict) and "score" in entry]
+    return valid[: max(0, int(limit))]
+
+
 def record_play(paths: AppPaths, profile: dict[str, Any], *, chart_key: str, result: dict[str, Any]) -> list[str]:
-    """プレイ成績を保存し、新しく解放された画像名を返す。"""
-    profile["lifetime_score"] = int(profile.get("lifetime_score", 0)) + int(result["score"])
+    """プレイ成績・自己ベスト・曲別ローカル順位表を保存し、新しく解放された画像名を返す。"""
+    score = int(result["score"])
+    profile["lifetime_score"] = int(profile.get("lifetime_score", 0)) + score
     old_score = int(profile.get("high_scores", {}).get(chart_key, 0))
-    profile.setdefault("high_scores", {})[chart_key] = max(old_score, int(result["score"]))
-    profile.setdefault("play_history", []).append({"played_at": now_iso(), **result, "chart_key": chart_key})
+    profile.setdefault("high_scores", {})[chart_key] = max(old_score, score)
+    played_at = now_iso()
+    entry = {
+        "played_at": played_at,
+        "score": score,
+        "accuracy": float(result.get("accuracy", 0.0)),
+        "max_combo": int(result.get("max_combo", 0)),
+        "rank": str(result.get("rank", "D")),
+    }
+    rankings = profile.setdefault("rankings", {})
+    if not isinstance(rankings, dict):
+        rankings = {}
+        profile["rankings"] = rankings
+    existing = rankings.get(chart_key, [])
+    if not isinstance(existing, list):
+        existing = []
+    ordered = [*existing, entry]
+    ordered.sort(
+        key=lambda candidate: (
+            -int(candidate.get("score", 0)),
+            -float(candidate.get("accuracy", 0.0)),
+            -int(candidate.get("max_combo", 0)),
+            str(candidate.get("played_at", "")),
+        )
+    )
+    rankings[chart_key] = ordered[:10]
+    try:
+        position = rankings[chart_key].index(entry) + 1
+    except ValueError:
+        position = 0
+    profile["last_play_ranking"] = {
+        "chart_key": chart_key,
+        "position": position,
+        "new_high_score": score > old_score,
+        "made_top_ten": position > 0,
+    }
+    profile.setdefault("play_history", []).append({"played_at": played_at, **result, "chart_key": chart_key})
     unlocked = set(profile.get("unlocked_rewards", []))
     newly_unlocked: list[str] = []
     for name, required in reward_thresholds(paths).items():

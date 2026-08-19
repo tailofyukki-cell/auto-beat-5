@@ -27,6 +27,7 @@ from persistence import (
     load_profile,
     load_settings,
     music_hash,
+    ranking_entries,
     record_play,
     record_recent_song,
     save_analysis,
@@ -481,6 +482,21 @@ class AutoBeatApp:
         self.calibration = None
         self.set_screen("settings")
 
+    def _current_chart_key(self) -> str | None:
+        if self.chart is None:
+            return None
+        return f"{self.chart.music_hash}:{self.chart.difficulty.value}"
+
+    def current_ranking(self, *, limit: int = 10) -> list[dict[str, object]]:
+        chart_key = self._current_chart_key()
+        return [] if chart_key is None else ranking_entries(self.profile, chart_key, limit=limit)
+
+    def open_ranking(self) -> None:
+        if self.chart is None:
+            self.error = "先に譜面を選択してください。"
+            return
+        self.set_screen("ranking")
+
     def finish_game(self) -> None:
         if not self.session or not self.chart:
             return
@@ -621,6 +637,7 @@ class AutoBeatApp:
             ("最大密度", f"{summary.peak_notes_per_second} notes / sec"),
             ("同時押し", f"{summary.chord_events} 回  (最大 {summary.max_chord_size} 個)"),
             ("安全補正", f"{summary.validation_removed} ノーツ除去 / {summary.validation_issues} 注意"),
+            ("自己ベスト", f"{self.current_ranking(limit=1)[0]['score']:,} pts" if self.current_ranking(limit=1) else "記録なし"),
         ]
         for index, (label, value) in enumerate(chart_rows):
             y = right_panel.top + 72 + index * 43
@@ -628,7 +645,35 @@ class AutoBeatApp:
             self.text(value, "small", WHITE, pos=(right_panel.left + 170, y))
         self.button("この譜面でプレイ  [ENTER]", pygame.Rect(width // 2 - 300, height - 122, 290, 50), self.start_game, accent=GREEN)
         self.button("もう一度生成  [R]", pygame.Rect(width // 2 + 10, height - 122, 290, 50), self.regenerate_chart, accent=YELLOW)
+        self.button("ランキング  [L]", pygame.Rect(width // 2 - 130, height - 66, 260, 38), self.open_ranking, accent=MAGENTA)
         self.button("難易度選択へ  [ESC]", pygame.Rect(45, height - 70, 190, 40), lambda: self.set_screen("difficulty"), accent=MUTED)
+
+    def draw_ranking(self) -> None:
+        if self.chart is None:
+            self.set_screen("title")
+            return
+        width, height = self.size
+        entries = self.current_ranking()
+        self.heading("LOCAL RANKING", f"{self.chart.difficulty.label}  ・  この曲と難易度の自己ベスト上位10件")
+        panel = pygame.Rect(width // 2 - 430, 145, 860, 430)
+        self.panel(panel)
+        headers = [("#", 58), ("SCORE", 125), ("ACCURACY", 345), ("MAX COMBO", 540), ("RANK", 735)]
+        for label, x in headers:
+            self.text(label, "small", MUTED, pos=(panel.left + x, panel.top + 22))
+        pygame.draw.line(self.surface, (66, 84, 118), (panel.left + 28, panel.top + 52), (panel.right - 28, panel.top + 52), 1)
+        if not entries:
+            self.text("この譜面のプレイ記録はまだありません。", "body", MUTED, center=(width // 2, panel.centery))
+        for index, entry in enumerate(entries):
+            y = panel.top + 66 + index * 35
+            if index % 2 == 0:
+                self.panel(pygame.Rect(panel.left + 20, y - 4, panel.width - 40, 29), PANEL_DARK, 5)
+            self.text(f"{index + 1}", "mono", YELLOW if index == 0 else WHITE, pos=(panel.left + 60, y))
+            self.text(f"{int(entry.get('score', 0)):,}", "mono", CYAN if index == 0 else WHITE, pos=(panel.left + 125, y))
+            self.text(f"{float(entry.get('accuracy', 0.0)):.2f}%", "small", WHITE, pos=(panel.left + 345, y + 2))
+            self.text(str(int(entry.get('max_combo', 0))), "mono", WHITE, pos=(panel.left + 560, y))
+            rank_label = str(entry.get("rank", "D"))
+            self.text(rank_label, "mono", GREEN if rank_label == "S" else WHITE, pos=(panel.left + 750, y))
+        self.button("譜面概要へ  [ESC]", pygame.Rect(width // 2 - 160, height - 80, 320, 44), lambda: self.set_screen("chart_summary"), accent=MAGENTA)
 
     def draw_game(self) -> None:
         if not self.session or not self.chart:
@@ -710,13 +755,21 @@ class AutoBeatApp:
         self.text(result.rank, "title", CYAN, center=(width // 2, 205))
         self.text(f"SCORE  {result.score:07d}", "h1", center=(width // 2, 280))
         self.text(f"MAX COMBO  {result.max_combo}     ACCURACY  {result.accuracy:.2f}%", "body", MUTED, center=(width // 2, 325))
+        last_ranking = self.profile.get("last_play_ranking", {})
+        if isinstance(last_ranking, dict) and last_ranking.get("chart_key") == result.chart_hash:
+            position = int(last_ranking.get("position", 0))
+            if last_ranking.get("new_high_score"):
+                self.text("NEW HIGH SCORE!", "body", GREEN, center=(width // 2, 352))
+            elif position > 0:
+                self.text(f"LOCAL RANK  #{position}", "small", MAGENTA, center=(width // 2, 352))
         labels = ["PERFECT", "GREAT", "GOOD", "MISS"]
         for index, label in enumerate(labels):
             self.panel(pygame.Rect(width // 2 - 320 + index * 165, 380, 150, 78))
             self.text(label, "small", MUTED, center=(width // 2 - 245 + index * 165, 405))
             self.text(str(result.judgments[label]), "h1", center=(width // 2 - 245 + index * 165, 435))
-        self.button("もう一度プレイ", pygame.Rect(width // 2 - 200, height - 125, 190, 48), self.start_game, accent=GREEN)
-        self.button("タイトルへ", pygame.Rect(width // 2 + 10, height - 125, 190, 48), lambda: self.set_screen("title"), accent=MUTED)
+        self.button("もう一度プレイ", pygame.Rect(width // 2 - 300, height - 125, 190, 48), self.start_game, accent=GREEN)
+        self.button("ランキング", pygame.Rect(width // 2 - 95, height - 125, 190, 48), self.open_ranking, accent=MAGENTA)
+        self.button("タイトルへ", pygame.Rect(width // 2 + 110, height - 125, 190, 48), lambda: self.set_screen("title"), accent=MUTED)
 
     def draw_unlock(self) -> None:
         width, height = self.size
@@ -926,6 +979,7 @@ class AutoBeatApp:
             "analyzing": self.draw_analyzing,
             "difficulty": self.draw_difficulty,
             "chart_summary": self.draw_chart_summary,
+            "ranking": self.draw_ranking,
             "game": self.draw_game,
             "result": self.draw_result,
             "unlock": self.draw_unlock,
@@ -969,8 +1023,13 @@ class AutoBeatApp:
                 self.start_game()
             elif event.key == pygame.K_r:
                 self.regenerate_chart()
+            elif event.key == pygame.K_l:
+                self.open_ranking()
             elif event.key == pygame.K_ESCAPE:
                 self.set_screen("difficulty")
+        elif self.screen == "ranking":
+            if event.key == pygame.K_ESCAPE:
+                self.set_screen("chart_summary")
         elif self.screen == "settings":
             if event.key == pygame.K_UP:
                 self.settings_selection = (self.settings_selection - 1) % len(self._settings_rows())
