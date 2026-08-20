@@ -9,6 +9,8 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 ROOT = Path(__file__).resolve().parents[1]
+# 視覚確認用の設定が実プレイのAppDataへ影響しないよう隔離する。
+os.environ["AUTOBEAT_DATA_DIR"] = str(ROOT / "artifacts" / "calibration_capture_data")
 sys.path.insert(0, str(ROOT / "src"))
 
 import pygame

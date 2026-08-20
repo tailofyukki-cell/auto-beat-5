@@ -8,6 +8,8 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 ROOT = Path(__file__).resolve().parents[1]
+# 視覚確認用の疑似ライブラリーを実プレイのAppDataへ残さない。
+os.environ["AUTOBEAT_DATA_DIR"] = str(ROOT / "artifacts" / "select_rankings_capture_data")
 sys.path.insert(0, str(ROOT / "src"))
 
 import pygame
