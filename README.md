@@ -89,6 +89,8 @@ macOS/Linuxでは動作確認に利用できますが、製品ターゲットは
 
 Windows上で`build_windows.bat`をダブルクリックすると、依存関係を導入して`dist\AutoBeat5\AutoBeat5.exe`を生成します。ビルド成果物のフォルダ全体を配布してください。実行するユーザーはPythonや開発環境を別途インストールする必要がありません。
 
+体験版ZIPを配布する場合は、必ず`build_trial_package.bat`を使用してください。このバッチは日本語ファイル名にUTF-8フラグを付ける`tools\package_trial_zip.py`を使い、Windowsの展開後も`demo_songs\ここから始まる～夜明けの光～.wav`のような日本語名を正しく維持します。`tar.exe`など、UTF-8ファイル名フラグを付与しない圧縮方法で体験版ZIPを作り直してはいけません。
+
 ```text
 AutoBeat5\
 ├─ AutoBeat5.exe
