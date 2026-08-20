@@ -72,7 +72,7 @@ class ComboAndCalibrationAppTest(unittest.TestCase):
 
     def test_settings_launch_and_apply_calibration(self) -> None:
         self.app.set_screen("settings")
-        self.app.settings_selection = 10
+        self.app.settings_selection = 11
         self.app.key_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN))
         self.assertEqual(self.app.screen, "calibration")
         self.assertIsNotNone(self.app.calibration)

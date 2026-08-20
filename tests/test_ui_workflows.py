@@ -50,7 +50,7 @@ class UiWorkflowTest(unittest.TestCase):
         self.app.settings_selection = 0
         self.app.adjust_setting(1)
         self.assertGreater(self.app.settings["music_volume"], original_volume)
-        self.app.settings_selection = 6
+        self.app.settings_selection = 7
         original_good = self.app.settings["judgment_windows_ms"]["good"]
         self.app.adjust_setting(1)
         self.assertGreater(self.app.settings["judgment_windows_ms"]["good"], original_good)
@@ -59,7 +59,7 @@ class UiWorkflowTest(unittest.TestCase):
 
     def test_note_theme_cycles_persists_and_settings_screen_draws(self) -> None:
         self.assertEqual(self.app.note_theme_key, "standard")
-        self.app.settings_selection = 7
+        self.app.settings_selection = 8
         self.app.adjust_setting(1)
         self.assertEqual(self.app.note_theme_key, "neon")
         self.assertEqual(self.app.note_theme_label, "NEON")
@@ -68,6 +68,21 @@ class UiWorkflowTest(unittest.TestCase):
         self.assertEqual(load_settings(self.app.paths)["note_theme"], "neon")
         self.app.screen = "settings"
         self.app.draw()
+
+    def test_tall_focus_increases_lookahead_and_persists(self) -> None:
+        _left, standard_width, _lane_width, standard_top, standard_line = self.app._game_field_geometry()
+        standard_time = (standard_line - standard_top) / self.app.effective_note_speed
+        self.app.settings_selection = 3
+        self.app.adjust_setting(1)
+        self.assertEqual(self.app.playfield_mode_key, "tall")
+        _left, tall_width, _lane_width, tall_top, tall_line = self.app._game_field_geometry()
+        tall_time = (tall_line - tall_top) / self.app.effective_note_speed
+        self.assertEqual(tall_width, standard_width)
+        self.assertLess(tall_top, standard_top)
+        self.assertGreater(tall_line, standard_line)
+        self.assertGreaterEqual(tall_time, standard_time * 1.28)
+        self.app.persist_settings()
+        self.assertEqual(load_settings(self.app.paths)["playfield_mode"], "tall")
 
     def test_combo_milestone_sets_banner(self) -> None:
         chart = Chart(1, "u" * 64, Difficulty.NORMAL, 1, 2.0, notes=[Note(1.0, 0)])
