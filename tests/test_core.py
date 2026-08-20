@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from chart_generator import ChartGenerator
+from chart_generator import ChartGenerator, RULES
 from chart_validator import ChartValidator
 from gameplay import GameSession, JudgmentWindows
 from models import AnalysisResult, Chart, Difficulty, Judgment, Note, NoteType
@@ -46,6 +46,18 @@ class CoreTest(unittest.TestCase):
         self.assertGreaterEqual(len(expert.notes), len(easy.notes))
         self.assertTrue(all(0 <= note.lane < 5 for note in expert.notes))
         self.assertTrue(any(note.kind is NoteType.HOLD for note in first.notes))
+
+    def test_windowed_lane_balance_spreads_cluster_without_moving_anchor(self) -> None:
+        generator = ChartGenerator()
+        notes = [
+            Note(1.20, 2, source="downbeat"),
+            *[Note(1.35 + index * 0.16, 0, source="onset") for index in range(12)],
+        ]
+        generator._spread_lane_load(notes, RULES[Difficulty.NORMAL])
+        self.assertEqual(notes[0].lane, 2, "小節頭アンカーは中央レーンに残す")
+        movable_counts = [sum(note.lane == lane for note in notes[1:]) for lane in range(5)]
+        self.assertGreaterEqual(sum(count > 0 for count in movable_counts), 4)
+        self.assertLessEqual(max(movable_counts) - min(movable_counts), 2)
 
     def test_low_difficulties_generate_no_simultaneous_notes(self) -> None:
         generator = ChartGenerator()

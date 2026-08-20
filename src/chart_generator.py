@@ -36,7 +36,7 @@ RULES: dict[Difficulty, DifficultyRule] = {
 
 
 class ChartGenerator:
-    VERSION = "1.3"
+    VERSION = "1.4"
 
     def generate(self, analysis: AnalysisResult, difficulty: Difficulty, *, variant: int = 0) -> Chart:
         """同じvariantでは再現可能に、variantを変えると別のレーン候補を生成する。"""
@@ -71,6 +71,7 @@ class ChartGenerator:
         if rule.allow_holds:
             self._add_holds(notes, analysis, difficulty)
         notes = self._cap_density(notes, analysis.duration, rule.max_notes_per_second)
+        self._spread_lane_load(notes, rule)
         # sustain候補はonset候補とは別経路で加わるため、最後に先頭の助走時間を統一する。
         notes = [note for note in notes if note.time >= START_LEAD_IN_SECONDS]
         chart = Chart(
@@ -90,6 +91,7 @@ class ChartGenerator:
                 "downbeats": len(analysis.downbeats),
                 "local_tempo_points": len(analysis.local_bpms),
                 "generation_variant": variant,
+                "lane_balance": "windowed-load-v1",
             },
         )
         chart.sort()
@@ -235,6 +237,69 @@ class ChartGenerator:
                     note.lane = pattern[index % len(pattern)]
                     note.source = "roll"
             start = end
+
+    def _spread_lane_load(self, notes: list[Note], rule: DifficultyRule) -> None:
+        """直近のレーン使用率を見て、通常ノーツだけを無理なく分散する。
+
+        小節頭・ロール・長押しは音楽的／演奏的な意味を持つため固定する。通常のonsetノーツは、
+        1.75秒の時間窓で使用回数が少ないレーンを優先し、同一レーンの連打も避ける。
+        """
+        if not notes:
+            return
+        notes.sort(key=lambda note: (note.time, note.lane))
+        groups: dict[float, list[Note]] = {}
+        for note in notes:
+            groups.setdefault(round(note.time, 5), []).append(note)
+
+        window_seconds = 1.75
+        recent: list[tuple[float, int]] = []
+        total_counts = [0] * 5
+        last_time_by_lane = [-inf] * 5
+        previous_lane: int | None = None
+        fixed_sources = {"downbeat", "roll", "sustain"}
+
+        for moment in sorted(groups):
+            group = groups[moment]
+            recent = [(time, lane) for time, lane in recent if moment - time <= window_seconds]
+            recent_counts = [sum(1 for _time, lane in recent if lane == target) for target in range(5)]
+            used = {note.lane for note in group if note.kind is NoteType.HOLD or note.source in fixed_sources}
+
+            # 音楽的なアンカーは先に確定して、可動ノーツが同時位置へ重ならないようにする。
+            for note in group:
+                if note.kind is NoteType.HOLD or note.source in fixed_sources:
+                    total_counts[note.lane] += 1
+                    last_time_by_lane[note.lane] = moment
+                    previous_lane = note.lane
+
+            for note in group:
+                if note.kind is NoteType.HOLD or note.source in fixed_sources:
+                    continue
+                original_lane = note.lane
+                candidates = [
+                    lane
+                    for lane in range(5)
+                    if lane not in used and moment - last_time_by_lane[lane] >= rule.min_gap
+                ]
+                if not candidates:
+                    # 高密度譜面などで安全な移動先がない場合は、元の配置を尊重する。
+                    candidates = [lane for lane in range(5) if lane not in used] or [original_lane]
+
+                def placement_cost(lane: int) -> float:
+                    local_load = recent_counts[lane] * 4.4
+                    global_load = total_counts[lane] * 0.45
+                    distance = abs(lane - original_lane) * 0.65
+                    repeat = 2.5 if lane == previous_lane else 0.0
+                    return local_load + global_load + distance + repeat
+
+                lane = min(candidates, key=placement_cost)
+                note.lane = lane
+                used.add(lane)
+                total_counts[lane] += 1
+                last_time_by_lane[lane] = moment
+                previous_lane = lane
+
+            recent.extend((moment, note.lane) for note in group)
+        notes.sort(key=lambda note: (note.time, note.lane))
 
     def _add_holds(self, notes: list[Note], analysis: AnalysisResult, difficulty: Difficulty) -> None:
         occupied: dict[int, list[tuple[float, float]]] = {lane: [] for lane in range(5)}
