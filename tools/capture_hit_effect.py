@@ -43,5 +43,15 @@ app.draw()
 output = ROOT / "artifacts" / "hit_effect.png"
 output.parent.mkdir(parents=True, exist_ok=True)
 pygame.image.save(app.surface, output)
+
+# 判定テキストとレーン演出の期限を過去へずらし、残留しないフレームを保存する。
+if app.judgment_feedback is not None:
+    app.judgment_feedback.started_at -= app.judgment_feedback.duration + 0.05
+for effect in app.hit_effects:
+    effect.started_at -= effect.duration + 0.05
+app.draw()
+expired_output = ROOT / "artifacts" / "hit_effect_expired.png"
+pygame.image.save(app.surface, expired_output)
 pygame.quit()
 print(output)
+print(expired_output)

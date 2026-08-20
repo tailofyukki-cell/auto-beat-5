@@ -8,6 +8,7 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 ROOT = Path(__file__).resolve().parents[1]
+os.environ.setdefault("AUTOBEAT_DATA_DIR", str(ROOT / "artifacts" / "chart_summary_capture_data"))
 sys.path.insert(0, str(ROOT / "src"))
 
 import pygame

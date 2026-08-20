@@ -72,6 +72,7 @@ JUDGMENT_COLORS = {Judgment.PERFECT: CYAN, Judgment.GREAT: GREEN, Judgment.GOOD:
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac"}
 LIBRARY_VISIBLE_ROWS = 6
 LIBRARY_ROW_HEIGHT = 72
+JUDGMENT_FEEDBACK_DURATION = 0.60
 
 
 @dataclass(slots=True)
@@ -82,6 +83,15 @@ class HitEffect:
     judgment: Judgment
     started_at: float
     duration: float = 0.18
+
+
+@dataclass(slots=True)
+class JudgmentFeedback:
+    """中央に短時間だけ表示する最新判定。"""
+
+    judgment: Judgment
+    started_at: float
+    duration: float = JUDGMENT_FEEDBACK_DURATION
 
 
 class AutoBeatApp:
@@ -153,6 +163,7 @@ class AutoBeatApp:
         self.combo_banner = ""
         self.combo_banner_until = 0.0
         self.hit_effects: list[HitEffect] = []
+        self.judgment_feedback: JudgmentFeedback | None = None
         self.countdown_started_at: float | None = None
         self.calibration: CalibrationSession | None = None
         self.start_banner_until = 0.0
@@ -372,9 +383,36 @@ class AutoBeatApp:
             x = left + effect.lane * lane_width
             self.surface.blit(layer, (x, line_y - layer_height // 2))
 
+    def _show_judgment_feedback(self, judgment: Judgment | None) -> None:
+        """最新判定を短時間だけ中央へ表示し、連打時は新しい判定で更新する。"""
+        if judgment is not None:
+            self.judgment_feedback = JudgmentFeedback(judgment=judgment, started_at=time.perf_counter())
+
+    def _draw_judgment_feedback(self) -> None:
+        """判定文字を0.6秒で上方へ少し移動させながらフェードアウトする。"""
+        feedback = self.judgment_feedback
+        if feedback is None:
+            return
+        elapsed = time.perf_counter() - feedback.started_at
+        if elapsed >= feedback.duration:
+            self.judgment_feedback = None
+            return
+        progress = max(0.0, min(1.0, elapsed / feedback.duration))
+        fade_start = 0.55
+        alpha = 255 if progress <= fade_start else int(255 * (1.0 - (progress - fade_start) / (1.0 - fade_start)))
+        if alpha <= 0:
+            self.judgment_feedback = None
+            return
+        rendered = self.fonts["h1"].render(feedback.judgment.value, True, JUDGMENT_COLORS[feedback.judgment])
+        rendered.set_alpha(alpha)
+        width, height = self.size
+        offset_y = int(12 * progress)
+        self.surface.blit(rendered, rendered.get_rect(center=(width // 2, height // 2 - offset_y)))
+
     def _play_feedback(self, judgment: Judgment | None, lane: int | None = None) -> None:
         if judgment is not None and judgment in self.feedback_sounds:
             self.feedback_sounds[judgment].play()
+        self._show_judgment_feedback(judgment)
         if lane is not None:
             self._emit_hit_effect(lane, judgment)
         self._check_combo_milestone()
@@ -708,6 +746,7 @@ class AutoBeatApp:
             )
             self.combo_banner = ""
             self.hit_effects = []
+            self.judgment_feedback = None
             self.countdown_started_at = time.perf_counter()
             self.start_banner_until = 0.0
             self.error = ""
@@ -744,6 +783,7 @@ class AutoBeatApp:
         self.tutorial_next_click_at = 0.0
         self.combo_banner = ""
         self.hit_effects = []
+        self.judgment_feedback = None
         self.countdown_started_at = time.perf_counter()
         self.start_banner_until = 0.0
         self.error = ""
@@ -1245,8 +1285,8 @@ class AutoBeatApp:
             self.text("ESC で楽曲選択へ戻る", "small", MUTED, center=(width // 2, height // 2 + 75))
         elif time.perf_counter() < self.start_banner_until:
             self.text("START!", "title", GREEN, center=(width // 2, height // 2))
-        elif self.session.latest_judgment:
-            self.text(self.session.latest_judgment.value, "h1", JUDGMENT_COLORS[self.session.latest_judgment], center=(width // 2, height // 2))
+        else:
+            self._draw_judgment_feedback()
         if time.perf_counter() < self.combo_banner_until:
             self.text(self.combo_banner, "title", MAGENTA, center=(width // 2, height // 2 - 75))
         if self.game_paused:

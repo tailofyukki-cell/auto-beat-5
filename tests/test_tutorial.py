@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import pygame
 from app import AutoBeatApp
 from chart_generator import ChartGenerator
-from models import AnalysisResult, Chart, Difficulty, Note
+from models import AnalysisResult, Chart, Difficulty, Judgment, Note
 from rewards import reward_progress
 from tutorial import TUTORIAL_STEPS, build_tutorial_chart
 
@@ -100,6 +100,21 @@ class TutorialTest(unittest.TestCase):
         )
         reward = next(item for item in self.app.gallery_rewards() if item.name == "trial_welcome.png")
         self.assertTrue(reward.unlocked)
+
+    def test_judgment_feedback_expires_and_new_hits_replace_it(self) -> None:
+        with patch("app.time.perf_counter", return_value=100.0):
+            self.app._play_feedback(Judgment.GOOD, lane=2)
+        self.assertIsNotNone(self.app.judgment_feedback)
+        self.assertEqual(self.app.judgment_feedback.judgment, Judgment.GOOD)
+
+        with patch("app.time.perf_counter", return_value=100.25):
+            self.app._play_feedback(Judgment.PERFECT, lane=2)
+        self.assertIsNotNone(self.app.judgment_feedback)
+        self.assertEqual(self.app.judgment_feedback.judgment, Judgment.PERFECT)
+
+        with patch("app.time.perf_counter", return_value=100.25 + self.app.judgment_feedback.duration + 0.01):
+            self.app._draw_judgment_feedback()
+        self.assertIsNone(self.app.judgment_feedback)
 
     def test_reward_progress_unlocks_by_lifetime_score_and_ignores_missing_images(self) -> None:
         for name, color in (("score_100.png", (80, 220, 160, 255)), ("score_300.png", (90, 170, 255, 255))):
