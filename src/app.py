@@ -37,7 +37,7 @@ from persistence import (
     save_profile,
     save_settings,
 )
-from rewards import RewardImage, RewardProgress, ensure_reward_template, reward_progress, scan_rewards
+from rewards import RewardCatalogItem, RewardImage, RewardProgress, ensure_reward_template, reward_catalog, reward_progress, scan_rewards
 from tutorial import TUTORIAL_BEAT_SECONDS, TUTORIAL_STEPS, build_tutorial_chart
 
 
@@ -72,6 +72,8 @@ JUDGMENT_COLORS = {Judgment.PERFECT: CYAN, Judgment.GREAT: GREEN, Judgment.GOOD:
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac"}
 LIBRARY_VISIBLE_ROWS = 6
 LIBRARY_ROW_HEIGHT = 72
+REWARD_MANAGER_VISIBLE_ROWS = 6
+REWARD_MANAGER_ROW_HEIGHT = 58
 JUDGMENT_FEEDBACK_DURATION = 0.60
 
 
@@ -149,6 +151,8 @@ class AutoBeatApp:
         self.selected_difficulty = 0
         self.library_scroll_index = 0
         self.library_selected_index = 0
+        self.reward_manager_scroll_index = 0
+        self.reward_manager_selected_index = 0
         self.session: GameSession | None = None
         self.audio = AudioClock()
         self.tutorial_step_index: int | None = None
@@ -587,6 +591,69 @@ class AutoBeatApp:
 
     def select_current_library_entry(self) -> None:
         self.select_library_entry(self.library_selected_index)
+
+    def reward_manager_entries(self) -> list[RewardCatalogItem]:
+        """設定・画像ファイル・累積スコアを突合した報酬管理一覧。"""
+        return reward_catalog(self.paths, self.profile)
+
+    def _clamp_reward_manager_position(self) -> None:
+        entries = self.reward_manager_entries()
+        if not entries:
+            self.reward_manager_scroll_index = 0
+            self.reward_manager_selected_index = 0
+            return
+        self.reward_manager_selected_index = max(0, min(self.reward_manager_selected_index, len(entries) - 1))
+        max_scroll = max(0, len(entries) - REWARD_MANAGER_VISIBLE_ROWS)
+        self.reward_manager_scroll_index = max(0, min(self.reward_manager_scroll_index, max_scroll))
+        if self.reward_manager_selected_index < self.reward_manager_scroll_index:
+            self.reward_manager_scroll_index = self.reward_manager_selected_index
+        elif self.reward_manager_selected_index >= self.reward_manager_scroll_index + REWARD_MANAGER_VISIBLE_ROWS:
+            self.reward_manager_scroll_index = self.reward_manager_selected_index - REWARD_MANAGER_VISIBLE_ROWS + 1
+
+    def open_reward_manager(self) -> None:
+        self._clamp_reward_manager_position()
+        self.set_screen("reward_manager")
+
+    def scroll_reward_manager(self, delta: int) -> None:
+        entries = self.reward_manager_entries()
+        if not entries:
+            return
+        max_scroll = max(0, len(entries) - REWARD_MANAGER_VISIBLE_ROWS)
+        self.reward_manager_scroll_index = max(0, min(self.reward_manager_scroll_index + delta, max_scroll))
+        first_visible = self.reward_manager_scroll_index
+        last_visible = min(len(entries) - 1, first_visible + REWARD_MANAGER_VISIBLE_ROWS - 1)
+        self.reward_manager_selected_index = max(first_visible, min(self.reward_manager_selected_index, last_visible))
+
+    def move_reward_manager_selection(self, delta: int) -> None:
+        entries = self.reward_manager_entries()
+        if not entries:
+            return
+        self.reward_manager_selected_index = max(0, min(self.reward_manager_selected_index + delta, len(entries) - 1))
+        self._clamp_reward_manager_position()
+
+    def select_reward_manager_entry(self, index: int) -> None:
+        entries = self.reward_manager_entries()
+        if not (0 <= index < len(entries)):
+            return
+        self.reward_manager_selected_index = index
+        self._clamp_reward_manager_position()
+        item = entries[index]
+        if not item.exists:
+            self.error = "設定はありますが、画像ファイルが rewards フォルダに見つかりません。"
+            return
+        if item.required_score is None:
+            self.error = "この画像には reward_config.json の required_score 設定がありません。"
+            return
+        if not item.unlocked:
+            self.message = f"{item.name} はあと {int(item.remaining_score or 0):,} pts で解放されます。"
+            return
+        self.open_reward(RewardImage(item.name, item.path, item.required_score, True))
+
+    def show_reward_folder(self) -> None:
+        self.message = f"画像フォルダ: {self.paths.rewards}"
+
+    def show_reward_config(self) -> None:
+        self.message = f"設定ファイル: {self.paths.rewards / 'reward_config.json'}"
 
     def load_recent_song(self, entry: dict[str, object]) -> None:
         path = Path(str(entry.get("source_path", ""))).expanduser()
@@ -1383,7 +1450,73 @@ class AutoBeatApp:
         if page_count > 1:
             self.button("← 前へ", pygame.Rect(width // 2 - 220, height - 72, 180, 40), lambda: setattr(self, "gallery_page", max(0, self.gallery_page - 1)), accent=MAGENTA)
             self.button("次へ →", pygame.Rect(width // 2 + 40, height - 72, 180, 40), lambda: setattr(self, "gallery_page", min(page_count - 1, self.gallery_page + 1)), accent=MAGENTA)
+        self.button("報酬を管理  [M]", pygame.Rect(width - 250, height - 72, 205, 40), self.open_reward_manager, accent=YELLOW)
         self.button("タイトルへ", pygame.Rect(45, height - 72, 150, 40), lambda: self.set_screen("title"), accent=MUTED)
+
+    def draw_reward_manager(self) -> None:
+        """報酬の必要スコア・画像有無・解放状況を一覧で確認する画面。"""
+        width, height = self.size
+        entries = self.reward_manager_entries()
+        self._clamp_reward_manager_position()
+        status = self.reward_status()
+        next_text = "次の目標はありません" if status.next_reward is None else f"次の解放: {status.next_reward.name}（あと {status.remaining_score:,} pts）"
+        self.heading("REWARD MANAGER", f"累積 {status.lifetime_score:,} pts  ・  解放 {status.unlocked_count}/{status.reward_count}  ・  {next_text}")
+        self.draw_reward_progress(pygame.Rect(95, 140, width - 190, 70), compact=True)
+
+        list_rect = pygame.Rect(95, 232, width - 190, REWARD_MANAGER_VISIBLE_ROWS * REWARD_MANAGER_ROW_HEIGHT + 16)
+        self.panel(list_rect)
+        if not entries:
+            self.text("報酬がありません。rewards フォルダへ画像を入れ、reward_config.json に必要スコアを設定してください。", "body", MUTED, center=list_rect.center)
+        else:
+            start = self.reward_manager_scroll_index
+            end = min(len(entries), start + REWARD_MANAGER_VISIBLE_ROWS)
+            for index in range(start, end):
+                item = entries[index]
+                row = pygame.Rect(list_rect.left + 12, list_rect.top + 10 + (index - start) * REWARD_MANAGER_ROW_HEIGHT, list_rect.width - 38, REWARD_MANAGER_ROW_HEIGHT - 5)
+                selected = index == self.reward_manager_selected_index
+                self.panel(row, (37, 57, 88) if selected else PANEL_DARK, 6)
+                pygame.draw.rect(self.surface, YELLOW if selected else (54, 71, 103), row, width=2 if selected else 1, border_radius=6)
+
+                preview_rect = pygame.Rect(row.left + 10, row.top + 7, 44, 38)
+                if item.exists:
+                    preview = self._load_scaled_reward(RewardImage(item.name, item.path, item.required_score, item.unlocked), preview_rect.width, preview_rect.height)
+                    if preview is not None:
+                        self.surface.blit(preview, preview.get_rect(center=preview_rect.center))
+                    else:
+                        self.text("!", "body", RED, center=preview_rect.center)
+                else:
+                    pygame.draw.rect(self.surface, (70, 45, 55), preview_rect, border_radius=4)
+                    self.text("?", "body", RED, center=preview_rect.center)
+
+                self.text(item.name, "small", WHITE, pos=(row.left + 68, row.top + 10))
+                required_text = "スコア条件なし" if item.required_score is None else f"{item.required_score:,} pts"
+                self.text(required_text, "small", MUTED, pos=(row.left + 340, row.top + 10))
+
+                if not item.exists:
+                    label, color, detail = "MISSING FILE", RED, "画像を追加してください"
+                elif item.required_score is None:
+                    label, color, detail = "NO SCORE RULE", YELLOW, "設定を追加してください"
+                elif item.unlocked:
+                    label, color, detail = "UNLOCKED", GREEN, "クリックで表示"
+                else:
+                    label, color, detail = "LOCKED", MUTED, f"あと {int(item.remaining_score or 0):,} pts"
+                self.text(label, "small", color, pos=(row.left + 535, row.top + 10))
+                self.text(detail, "small", color if label == "LOCKED" else MUTED, pos=(row.left + 710, row.top + 10))
+                self.buttons.append((row, lambda selected_index=index: self.select_reward_manager_entry(selected_index)))
+
+            if len(entries) > REWARD_MANAGER_VISIBLE_ROWS:
+                track = pygame.Rect(list_rect.right - 16, list_rect.top + 10, 6, list_rect.height - 20)
+                pygame.draw.rect(self.surface, PANEL_DARK, track, border_radius=3)
+                thumb_height = max(26, int(track.height * REWARD_MANAGER_VISIBLE_ROWS / len(entries)))
+                max_scroll = len(entries) - REWARD_MANAGER_VISIBLE_ROWS
+                progress = self.reward_manager_scroll_index / max_scroll if max_scroll else 0.0
+                thumb_top = track.top + int((track.height - thumb_height) * progress)
+                pygame.draw.rect(self.surface, YELLOW, pygame.Rect(track.left, thumb_top, track.width, thumb_height), border_radius=3)
+
+        self.text(f"{self.reward_manager_scroll_index + 1 if entries else 0}-{min(len(entries), self.reward_manager_scroll_index + REWARD_MANAGER_VISIBLE_ROWS)} / {len(entries)}", "small", MUTED, center=(width // 2, height - 115))
+        self.button("画像フォルダの場所  [F]", pygame.Rect(80, height - 72, 235, 40), self.show_reward_folder, accent=CYAN)
+        self.button("設定ファイルの場所  [C]", pygame.Rect(330, height - 72, 235, 40), self.show_reward_config, accent=YELLOW)
+        self.button("ギャラリーへ  [ESC]", pygame.Rect(width - 310, height - 72, 230, 40), lambda: self.set_screen("gallery"), accent=MAGENTA)
 
     def draw_gallery_preview(self) -> None:
         width, height = self.size
@@ -1568,6 +1701,7 @@ class AutoBeatApp:
             "result": self.draw_result,
             "unlock": self.draw_unlock,
             "gallery": self.draw_gallery,
+            "reward_manager": self.draw_reward_manager,
             "gallery_preview": self.draw_gallery_preview,
             "settings": self.draw_settings,
             "calibration": self.draw_calibration,
@@ -1695,8 +1829,33 @@ class AutoBeatApp:
                 self.gallery_page = max(0, self.gallery_page - 1)
             elif event.key == pygame.K_RIGHT:
                 self.gallery_page += 1
+            elif event.key == pygame.K_m:
+                self.open_reward_manager()
             elif event.key == pygame.K_ESCAPE:
                 self.set_screen("title")
+        elif self.screen == "reward_manager":
+            if event.key == pygame.K_UP:
+                self.move_reward_manager_selection(-1)
+            elif event.key == pygame.K_DOWN:
+                self.move_reward_manager_selection(1)
+            elif event.key == pygame.K_PAGEUP:
+                self.move_reward_manager_selection(-REWARD_MANAGER_VISIBLE_ROWS)
+            elif event.key == pygame.K_PAGEDOWN:
+                self.move_reward_manager_selection(REWARD_MANAGER_VISIBLE_ROWS)
+            elif event.key == pygame.K_HOME:
+                self.reward_manager_selected_index = 0
+                self._clamp_reward_manager_position()
+            elif event.key == pygame.K_END:
+                self.reward_manager_selected_index = max(0, len(self.reward_manager_entries()) - 1)
+                self._clamp_reward_manager_position()
+            elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                self.select_reward_manager_entry(self.reward_manager_selected_index)
+            elif event.key == pygame.K_f:
+                self.show_reward_folder()
+            elif event.key == pygame.K_c:
+                self.show_reward_config()
+            elif event.key == pygame.K_ESCAPE:
+                self.set_screen("gallery")
         elif self.screen == "gallery_preview":
             if event.key == pygame.K_ESCAPE:
                 self.set_screen("gallery")
@@ -1770,6 +1929,8 @@ class AutoBeatApp:
                     self.running = False
                 elif event.type == pygame.MOUSEWHEEL and self.screen == "library":
                     self.scroll_library(-event.y)
+                elif event.type == pygame.MOUSEWHEEL and self.screen == "reward_manager":
+                    self.scroll_reward_manager(-event.y)
                 elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                     for rect, action in self.buttons:
                         if rect.collidepoint(event.pos):

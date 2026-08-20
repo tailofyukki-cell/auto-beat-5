@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,18 @@ class RewardProgress:
     next_required_score: int | None
     remaining_score: int
     progress_ratio: float
+
+
+@dataclass(frozen=True, slots=True)
+class RewardCatalogItem:
+    """報酬管理画面で表示する、設定と実画像を突合した1件分の状態。"""
+
+    name: str
+    path: Path
+    required_score: int | None
+    exists: bool
+    unlocked: bool
+    remaining_score: int | None
 
 
 def ensure_reward_template(paths: AppPaths) -> None:
@@ -72,6 +85,61 @@ def scan_rewards(paths: AppPaths, unlocked_names: set[str], lifetime_score: int 
         )
         for image in sorted(images, key=lambda item: (thresholds.get(item.name, 10**18), item.name.lower()))
     ]
+
+
+def reward_catalog(paths: AppPaths, profile: dict[str, Any]) -> list[RewardCatalogItem]:
+    """設定済み・未設定・不足画像を含む報酬一覧を、管理画面向けに返す。"""
+    paths.ensure()
+    lifetime_score = max(0, int(profile.get("lifetime_score", 0)))
+    unlocked_names = set(profile.get("unlocked_rewards", []))
+    config_path = paths.rewards / "reward_config.json"
+    raw: dict[str, Any] = {}
+    try:
+        loaded = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+        raw = loaded if isinstance(loaded, dict) else {}
+    except (OSError, ValueError, json.JSONDecodeError):
+        raw = {}
+
+    configured: dict[str, int] = {}
+    for name, value in raw.items():
+        try:
+            required = int(value.get("required_score", -1)) if isinstance(value, dict) else -1
+        except (TypeError, ValueError):
+            continue
+        if required >= 0:
+            configured[str(name)] = required
+
+    images = {
+        file.name: file
+        for file in paths.rewards.iterdir()
+        if file.is_file() and file.suffix.lower() in SUPPORTED_IMAGES
+    }
+    names = set(configured) | set(images)
+    catalog: list[RewardCatalogItem] = []
+    for name in names:
+        path = images.get(name, paths.rewards / name)
+        exists = name in images
+        required = configured.get(name)
+        unlocked = bool(exists and required is not None and (name in unlocked_names or lifetime_score >= required))
+        remaining = None if required is None else max(0, required - lifetime_score)
+        catalog.append(
+            RewardCatalogItem(
+                name=name,
+                path=path,
+                required_score=required,
+                exists=exists,
+                unlocked=unlocked,
+                remaining_score=remaining,
+            )
+        )
+    return sorted(
+        catalog,
+        key=lambda item: (
+            item.required_score is None,
+            item.required_score if item.required_score is not None else 10**18,
+            item.name.lower(),
+        ),
+    )
 
 
 def reward_progress(paths: AppPaths, profile: dict[str, Any]) -> RewardProgress:

@@ -18,7 +18,7 @@ import pygame
 from app import AutoBeatApp
 from chart_generator import ChartGenerator
 from models import AnalysisResult, Chart, Difficulty, Judgment, Note
-from rewards import reward_progress
+from rewards import reward_catalog, reward_progress
 from tutorial import TUTORIAL_STEPS, build_tutorial_chart
 
 
@@ -115,6 +115,30 @@ class TutorialTest(unittest.TestCase):
         with patch("app.time.perf_counter", return_value=100.25 + self.app.judgment_feedback.duration + 0.01):
             self.app._draw_judgment_feedback()
         self.assertIsNone(self.app.judgment_feedback)
+
+    def test_reward_manager_lists_missing_images_and_scrolls_many_rewards(self) -> None:
+        config: dict[str, dict[str, int]] = {}
+        for index in range(8):
+            name = f"reward_{index + 1:03d}.png"
+            config[name] = {"required_score": (index + 1) * 100000}
+            if index < 7:
+                image = pygame.Surface((16, 16), pygame.SRCALPHA)
+                image.fill((40 + index * 20, 150, 220, 255))
+                pygame.image.save(image, str(self.app.paths.rewards / name))
+        (self.app.paths.rewards / "reward_config.json").write_text(json.dumps(config), encoding="utf-8")
+        self.app.profile["lifetime_score"] = 250000
+
+        catalog = reward_catalog(self.app.paths, self.app.profile)
+        self.assertEqual(len(catalog), 8)
+        self.assertTrue(catalog[0].unlocked)
+        self.assertFalse(catalog[-1].exists)
+
+        self.app.open_reward_manager()
+        self.assertEqual(self.app.screen, "reward_manager")
+        self.app.scroll_reward_manager(20)
+        self.assertEqual(self.app.reward_manager_scroll_index, 2)
+        self.assertGreaterEqual(self.app.reward_manager_selected_index, 2)
+        self.app.draw()
 
     def test_reward_progress_unlocks_by_lifetime_score_and_ignores_missing_images(self) -> None:
         for name, color in (("score_100.png", (80, 220, 160, 255)), ("score_300.png", (90, 170, 255, 255))):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,19 +29,17 @@ def create_reward(path: Path, color: tuple[int, int, int]) -> None:
 
 
 def main() -> None:
+    shutil.rmtree(ARTIFACTS, ignore_errors=True)
     app = AutoBeatApp()
     app.paths.rewards.mkdir(parents=True, exist_ok=True)
-    create_reward(app.paths.rewards / "reward_100.png", (32, 130, 158))
-    create_reward(app.paths.rewards / "reward_300.png", (89, 55, 158))
+    config: dict[str, dict[str, int]] = {}
+    for index in range(8):
+        name = f"reward_{index + 1:03d}.png"
+        config[name] = {"required_score": (index + 1) * 100000}
+        if index < 7:
+            create_reward(app.paths.rewards / name, (32 + index * 20, 130 - index * 7, 158 + index * 8))
     (app.paths.rewards / "reward_config.json").write_text(
-        json.dumps(
-            {
-                "reward_100.png": {"required_score": 100000},
-                "reward_300.png": {"required_score": 300000},
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
+        json.dumps(config, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -50,10 +49,16 @@ def main() -> None:
     pygame.image.save(app.surface, str(ARTIFACTS / "gallery_progress.png"))
 
     app.profile["lifetime_score"] = 100000
-    app.newly_unlocked = ["reward_100.png"]
+    app.newly_unlocked = ["reward_001.png"]
     app.screen = "unlock"
     app.draw()
     pygame.image.save(app.surface, str(ARTIFACTS / "unlock_notice.png"))
+
+    app.profile["lifetime_score"] = 250000
+    app.open_reward_manager()
+    app.scroll_reward_manager(2)
+    app.draw()
+    pygame.image.save(app.surface, str(ARTIFACTS / "reward_manager.png"))
     pygame.quit()
 
 
