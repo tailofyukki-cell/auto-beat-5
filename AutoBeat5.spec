@@ -15,7 +15,7 @@ for package in ("pygame", "librosa", "soundfile", "scipy", "sklearn", "numba", "
     binaries += package_binaries
     hiddenimports += package_hiddenimports
 
-for folder in ("fonts", "licenses", "docs", "rewards"):
+for folder in ("fonts", "licenses", "docs", "rewards", "demo_songs"):
     source = project_root / folder
     if source.exists():
         datas.append((str(source), folder))

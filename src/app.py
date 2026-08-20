@@ -33,9 +33,11 @@ from persistence import (
     record_recent_song,
     save_analysis,
     save_chart,
+    save_profile,
     save_settings,
 )
 from rewards import RewardImage, ensure_reward_template, scan_rewards
+from tutorial import TUTORIAL_BEAT_SECONDS, TUTORIAL_STEPS, build_tutorial_chart
 
 
 WINDOW_TITLE = "AutoBeat 5"
@@ -66,6 +68,7 @@ PLAYFIELD_MODES: dict[str, tuple[str, float]] = {
     "tall": ("TALL FOCUS", 0.82),
 }
 JUDGMENT_COLORS = {Judgment.PERFECT: CYAN, Judgment.GREAT: GREEN, Judgment.GOOD: YELLOW, Judgment.MISS: RED}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac"}
 
 
 @dataclass(slots=True)
@@ -133,6 +136,10 @@ class AutoBeatApp:
         self.selected_difficulty = 0
         self.session: GameSession | None = None
         self.audio = AudioClock()
+        self.tutorial_step_index: int | None = None
+        self.tutorial_started_at: float | None = None
+        self.tutorial_paused_at: float | None = None
+        self.tutorial_next_click_at = 0.0
         self.key_capture_lane: int | None = None
         self.settings_selection = 0
         self.newly_unlocked: list[str] = []
@@ -175,10 +182,30 @@ class AutoBeatApp:
     def countdown_active(self) -> bool:
         return self.countdown_started_at is not None and self._countdown_remaining() > 0.0
 
+    @property
+    def tutorial_active(self) -> bool:
+        return self.tutorial_step_index is not None
+
+    @property
+    def game_paused(self) -> bool:
+        return self.tutorial_paused_at is not None if self.tutorial_active else self.audio.paused
+
+    def gameplay_time(self) -> float:
+        """通常プレイは音源時計、チュートリアルは単調時計を判定に用いる。"""
+        if not self.tutorial_active or self.tutorial_started_at is None:
+            return self.audio.time if not self.tutorial_active else 0.0
+        end = self.tutorial_paused_at if self.tutorial_paused_at is not None else time.perf_counter()
+        return max(0.0, end - self.tutorial_started_at)
+
     def _start_after_countdown(self) -> None:
-        """カウント終了後、音源・ノーツ時計・判定を同一フレームから開始する。"""
+        """カウント終了後、通常曲またはチュートリアルの時計・判定を開始する。"""
         self.countdown_started_at = None
-        self.audio.play()
+        if self.tutorial_active:
+            self.tutorial_started_at = time.perf_counter()
+            self.tutorial_paused_at = None
+            self.tutorial_next_click_at = 0.0
+        else:
+            self.audio.play()
         self.start_banner_until = time.perf_counter() + 0.42
 
     @staticmethod
@@ -355,6 +382,22 @@ class AutoBeatApp:
             self.combo_banner = f"{self.session.combo} COMBO!"
             self.combo_banner_until = time.perf_counter() + 1.8
 
+    def select_song_path(self, path: Path) -> None:
+        """外部選択・同梱デモ曲のどちらからでも、同じ解析フローへ進める。"""
+        if not path.is_file():
+            self.error = "音楽ファイルが見つかりません。"
+            return
+        if path.suffix.lower() not in AUDIO_EXTENSIONS:
+            self.error = "MP3 / WAV / OGG / FLAC の音楽ファイルを選択してください。"
+            return
+        self.song_path = path
+        self.analysis = None
+        self.chart = None
+        self.committed_chart = None
+        self.pending_chart = None
+        self.error = ""
+        self.begin_analysis()
+
     def choose_file(self) -> None:
         try:
             import tkinter as tk
@@ -372,13 +415,23 @@ class AutoBeatApp:
             self.error = f"ファイル選択を開けませんでした: {error}"
             return
         if selected:
-            self.song_path = Path(selected)
-            self.analysis = None
-            self.chart = None
-            self.committed_chart = None
-            self.pending_chart = None
-            self.error = ""
-            self.begin_analysis()
+            self.select_song_path(Path(selected))
+
+    def demo_song_files(self) -> list[Path]:
+        """制作者が配布物へ追加したデモ曲だけを、名前順で取得する。"""
+        folder = self.paths.demo_songs
+        if folder is None:
+            return []
+        try:
+            return sorted(
+                (path for path in folder.iterdir() if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS),
+                key=lambda path: path.name.lower(),
+            )
+        except OSError:
+            return []
+
+    def load_demo_song(self, path: Path) -> None:
+        self.select_song_path(path)
 
     def load_recent_song(self, entry: dict[str, object]) -> None:
         path = Path(str(entry.get("source_path", ""))).expanduser()
@@ -516,6 +569,9 @@ class AutoBeatApp:
     def start_game(self) -> None:
         if not self.chart or not self.analysis or not self.song_path:
             return
+        self.tutorial_step_index = None
+        self.tutorial_started_at = None
+        self.tutorial_paused_at = None
         if not self.audio_available:
             self.error = "音声デバイスを初期化できないため、プレイを開始できません。"
             self.screen = "difficulty"
@@ -537,6 +593,55 @@ class AutoBeatApp:
         except AudioClockError as error:
             self.error = str(error)
             self.screen = "difficulty"
+
+    def start_tutorial(self) -> None:
+        """音源なし・メトロノーム型の最初の課題を開始する。"""
+        self.start_tutorial_step(0)
+
+    def start_tutorial_step(self, step_index: int) -> None:
+        if not self.audio_available or not self.feedback_sounds:
+            self.error = "効果音を初期化できないため、チュートリアルを開始できません。"
+            self.set_screen("tutorial")
+            return
+        try:
+            chart = build_tutorial_chart(step_index)
+        except (IndexError, ValueError) as error:
+            self.error = f"チュートリアルを準備できませんでした: {error}"
+            self.set_screen("tutorial")
+            return
+        windows = JudgmentWindows.from_ms(self.settings["judgment_windows_ms"])
+        self.chart = chart
+        self.session = GameSession(
+            chart,
+            windows,
+            timing_offset=float(self.settings.get("timing_offset_ms", 0)) / 1000.0,
+        )
+        self.tutorial_step_index = step_index
+        self.tutorial_started_at = None
+        self.tutorial_paused_at = None
+        self.tutorial_next_click_at = 0.0
+        self.combo_banner = ""
+        self.hit_effects = []
+        self.countdown_started_at = time.perf_counter()
+        self.start_banner_until = 0.0
+        self.error = ""
+        self.screen = "game"
+
+    def finish_tutorial_step(self) -> None:
+        if self.tutorial_step_index is None:
+            return
+        if self.tutorial_step_index == len(TUTORIAL_STEPS) - 1:
+            self.profile["tutorial_completed"] = True
+            save_profile(self.paths, self.profile)
+        self.screen = "tutorial_result"
+
+    def update_tutorial_metronome(self, elapsed: float) -> None:
+        sound = self.feedback_sounds.get(Judgment.PERFECT)
+        if sound is None:
+            return
+        while elapsed >= self.tutorial_next_click_at:
+            sound.play()
+            self.tutorial_next_click_at += TUTORIAL_BEAT_SECONDS
 
     def begin_calibration(self) -> None:
         """0.5秒間隔のクリックに合わせた入力でTiming Offsetを測定する。"""
@@ -588,6 +693,9 @@ class AutoBeatApp:
     def finish_game(self) -> None:
         if not self.session or not self.chart:
             return
+        if self.tutorial_active:
+            self.finish_tutorial_step()
+            return
         result = self.session.result().to_dict()
         self.newly_unlocked = record_play(self.paths, self.profile, chart_key=result["chart_hash"], result=result)
         self.screen = "unlock" if self.newly_unlocked else "result"
@@ -596,16 +704,36 @@ class AutoBeatApp:
         # カウントダウン中は音源未開始のため、ESCは中止操作として扱う。
         if self.countdown_active:
             return
-        if self.audio.paused:
+        if self.tutorial_active:
+            if self.tutorial_paused_at is None:
+                self.tutorial_paused_at = time.perf_counter()
+            else:
+                paused_for = time.perf_counter() - self.tutorial_paused_at
+                if self.tutorial_started_at is not None:
+                    self.tutorial_started_at += paused_for
+                self.tutorial_next_click_at += paused_for
+                self.tutorial_paused_at = None
+        elif self.audio.paused:
             self.audio.resume()
         else:
             self.audio.pause()
 
     def retry_game(self) -> None:
+        if self.tutorial_active and self.tutorial_step_index is not None:
+            self.start_tutorial_step(self.tutorial_step_index)
+            return
         self.audio.stop()
         self.start_game()
 
     def return_to_song_select(self) -> None:
+        if self.tutorial_active:
+            self.countdown_started_at = None
+            self.tutorial_step_index = None
+            self.tutorial_started_at = None
+            self.tutorial_paused_at = None
+            self.session = None
+            self.set_screen("tutorial")
+            return
         self.audio.stop()
         self.countdown_started_at = None
         self.session = None
@@ -634,11 +762,12 @@ class AutoBeatApp:
 
     def draw_title(self) -> None:
         width, height = self.size
-        self.text("AUTO BEAT 5", "title", CYAN, center=(width // 2, height // 2 - 135))
-        self.text("あなたの音楽を、あなたの譜面へ。", "body", MUTED, center=(width // 2, height // 2 - 80))
-        self.button("PLAY", pygame.Rect(width // 2 - 160, height // 2 - 20, 320, 54), lambda: self.set_screen("select"))
-        self.button("GALLERY", pygame.Rect(width // 2 - 160, height // 2 + 50, 320, 46), lambda: self.set_screen("gallery"), accent=MAGENTA)
-        self.button("SETTINGS", pygame.Rect(width // 2 - 160, height // 2 + 110, 320, 46), lambda: self.set_screen("settings"), accent=YELLOW)
+        self.text("AUTO BEAT 5", "title", CYAN, center=(width // 2, height // 2 - 165))
+        self.text("あなたの音楽を、あなたの譜面へ。", "body", MUTED, center=(width // 2, height // 2 - 110))
+        self.button("PLAY", pygame.Rect(width // 2 - 160, height // 2 - 55, 320, 50), lambda: self.set_screen("select"))
+        self.button("TUTORIAL", pygame.Rect(width // 2 - 160, height // 2 + 7, 320, 46), lambda: self.set_screen("tutorial"), accent=GREEN)
+        self.button("GALLERY", pygame.Rect(width // 2 - 160, height // 2 + 65, 320, 46), lambda: self.set_screen("gallery"), accent=MAGENTA)
+        self.button("SETTINGS", pygame.Rect(width // 2 - 160, height // 2 + 123, 320, 46), lambda: self.set_screen("settings"), accent=YELLOW)
         self.text("MP3 / WAV / OGG / FLAC ・ 5 lanes ・ offline", "small", MUTED, center=(width // 2, height - 42))
 
     def _song_best_text(self, music_hash: str) -> str:
@@ -655,19 +784,34 @@ class AutoBeatApp:
 
     def draw_select(self) -> None:
         width, height = self.size
-        self.heading("楽曲選択", "ユーザーが利用権限を持つ音楽ファイルを選択してください")
+        self.heading("楽曲選択", "ユーザーが利用権限を持つ音楽ファイル、または同梱デモ曲を選択してください")
         selected = str(self.song_path) if self.song_path else "まだ選択されていません"
-        self.panel(pygame.Rect(100, 145, width - 200, 125))
-        self.text("選択中の楽曲", "small", MUTED, pos=(130, 165))
-        self.text(Path(selected).name if self.song_path else selected, "h1" if self.song_path else "body", pos=(130, 195))
+        self.panel(pygame.Rect(100, 145, width - 200, 112))
+        self.text("選択中の楽曲", "small", MUTED, pos=(130, 162))
+        self.text(Path(selected).name if self.song_path else selected, "h1" if self.song_path else "body", pos=(130, 190))
         if self.song_path:
-            self.text(str(self.song_path), "small", MUTED, pos=(130, 238))
-        self.button("音楽ファイルを選択", pygame.Rect(width // 2 - 190, 290, 380, 45), self.choose_file)
-        recent = self.profile.get("recent_songs", [])[:4]
+            self.text(str(self.song_path), "small", MUTED, pos=(130, 228))
+        self.button("音楽ファイルを選択", pygame.Rect(width // 2 - 190, 270, 380, 42), self.choose_file)
+
+        y = 342
+        demos = self.demo_song_files()[:2]
+        if demos:
+            self.text("DEMO SONGS", "body", GREEN, pos=(125, y))
+            y += 31
+            for demo in demos:
+                rect = pygame.Rect(120, y, width - 240, 48)
+                self.panel(rect, (27, 54, 61), 7)
+                self.text(demo.name, "body", WHITE, pos=(rect.left + 16, rect.top + 13))
+                self.text("同梱デモ曲", "small", GREEN, pos=(rect.right - 112, rect.top + 16))
+                self.buttons.append((rect, lambda selected_demo=demo: self.load_demo_song(selected_demo)))
+                y += 56
+
+        recent = self.profile.get("recent_songs", [])[: (1 if demos else 4)]
         if recent:
-            self.text("RECENT LIBRARY", "body", YELLOW, pos=(125, 365))
-            for index, entry in enumerate(recent):
-                rect = pygame.Rect(120, 398 + index * 60, width - 240, 54)
+            self.text("RECENT LIBRARY", "body", YELLOW, pos=(125, y))
+            y += 31
+            for entry in recent:
+                rect = pygame.Rect(120, y, width - 240, 54)
                 self.panel(rect, PANEL_DARK, 7)
                 song_name = Path(str(entry.get("source_path", ""))).name or "不明な楽曲"
                 digest = str(entry.get("music_hash", ""))
@@ -675,9 +819,52 @@ class AutoBeatApp:
                 self.text(f"{float(entry.get('bpm', 0.0)):.1f} BPM   {float(entry.get('duration', 0.0)):.1f} sec", "small", MUTED, pos=(rect.right - 220, rect.top + 7))
                 self.text(f"BEST  {self._song_best_text(digest)}", "small", CYAN if song_ranking_summary(self.profile, digest) else MUTED, pos=(rect.left + 14, rect.top + 29))
                 self.buttons.append((rect, lambda selected_entry=entry: self.load_recent_song(selected_entry)))
-        else:
-            self.text("解析した楽曲は、ここから再選択できます。", "small", MUTED, center=(width // 2, 425))
+                y += 60
+        elif not demos:
+            self.text("解析した楽曲は、ここから再選択できます。", "small", MUTED, center=(width // 2, 410))
+            self.text("demo_songs フォルダへ制作者のデモ曲を追加できます。", "small", GREEN, center=(width // 2, 440))
         self.button("戻る", pygame.Rect(50, height - 72, 140, 40), lambda: self.set_screen("title"), accent=MUTED)
+
+    def draw_tutorial(self) -> None:
+        width, height = self.size
+        completed = bool(self.profile.get("tutorial_completed", False))
+        subtitle = "音源なし。クリック音に合わせて基本操作を練習します。"
+        if completed:
+            subtitle += "  チュートリアル完了済み"
+        self.heading("TUTORIAL", subtitle)
+        panel = pygame.Rect(width // 2 - 450, 145, 900, 360)
+        self.panel(panel)
+        for index, step in enumerate(TUTORIAL_STEPS):
+            y = panel.top + 24 + index * 78
+            row = pygame.Rect(panel.left + 24, y, panel.width - 48, 62)
+            self.panel(row, PANEL_DARK, 8)
+            self.text(step.title, "body", GREEN if completed else CYAN, pos=(row.left + 18, row.top + 10))
+            self.text(step.instruction, "small", MUTED, pos=(row.left + 18, row.top + 36))
+            self.text(f"{len(step.notes)} NOTES", "small", YELLOW, pos=(row.right - 105, row.top + 23))
+        self.button("最初から始める  [ENTER]", pygame.Rect(width // 2 - 190, height - 130, 380, 48), self.start_tutorial, accent=GREEN)
+        self.button("タイトルへ  [ESC]", pygame.Rect(width // 2 - 150, height - 72, 300, 40), lambda: self.set_screen("title"), accent=MUTED)
+
+    def draw_tutorial_result(self) -> None:
+        if not self.session or self.tutorial_step_index is None:
+            self.set_screen("tutorial")
+            return
+        width, height = self.size
+        result = self.session.result()
+        step = TUTORIAL_STEPS[self.tutorial_step_index]
+        is_last = self.tutorial_step_index == len(TUTORIAL_STEPS) - 1
+        self.heading("TUTORIAL RESULT", "すべての判定結果です。苦手な操作は何度でも練習できます。")
+        self.panel(pygame.Rect(width // 2 - 360, 150, 720, 310))
+        self.text(step.title, "h1", CYAN, center=(width // 2, 198))
+        self.text(result.rank, "title", GREEN if result.rank in {"S", "A"} else CYAN, center=(width // 2, 285))
+        self.text(f"PERFECT {result.judgments['PERFECT']}   GREAT {result.judgments['GREAT']}   GOOD {result.judgments['GOOD']}   MISS {result.judgments['MISS']}", "body", MUTED, center=(width // 2, 357))
+        self.text(f"ACCURACY  {result.accuracy:.2f}%", "body", WHITE, center=(width // 2, 398))
+        if is_last:
+            self.text("チュートリアル完了。次は PLAY から好きな曲を選びましょう。", "body", GREEN, center=(width // 2, 500))
+            self.button("タイトルへ  [ENTER]", pygame.Rect(width // 2 - 190, height - 130, 380, 48), lambda: self.set_screen("title"), accent=GREEN)
+        else:
+            self.button("次の課題へ  [ENTER]", pygame.Rect(width // 2 - 190, height - 130, 380, 48), lambda: self.start_tutorial_step(self.tutorial_step_index + 1), accent=GREEN)
+        self.button("もう一度練習  [R]", pygame.Rect(width // 2 - 190, height - 72, 185, 40), self.retry_game, accent=CYAN)
+        self.button("課題一覧へ  [ESC]", pygame.Rect(width // 2 + 5, height - 72, 185, 40), self.return_to_song_select, accent=MUTED)
 
     def draw_analyzing(self) -> None:
         width, height = self.size
@@ -788,7 +975,7 @@ class AutoBeatApp:
         width, height = self.size
         left, field_width, lane_width, field_top, line_y = self._game_field_geometry()
         counting_down = self.countdown_active
-        now = self.audio.time if not counting_down else 0.0
+        now = self.gameplay_time() if not counting_down else 0.0
         for lane in range(5):
             x = left + lane * lane_width
             color = self.lane_colors[lane]
@@ -832,7 +1019,9 @@ class AutoBeatApp:
         self.text(f"SCORE  {self.session.score:07d}", "mono", pos=(45, 45))
         self.text(f"COMBO  {self.session.combo}", "mono", YELLOW, pos=(45, 75))
         self.text(f"{now:.1f} / {self.chart.song_duration:.1f}", "mono", MUTED, pos=(width - 190, 45))
-        self.text(self.chart.difficulty.label, "mono", CYAN, pos=(width - 150, 75))
+        self.text("TUTORIAL" if self.tutorial_active else self.chart.difficulty.label, "mono", GREEN if self.tutorial_active else CYAN, pos=(width - 150, 75))
+        if self.tutorial_active:
+            self.text(str(self.chart.metadata.get("tutorial_instruction", "")), "small", GREEN, center=(width // 2, 34))
         if self.playfield_mode_key == "tall":
             self.text("TALL FOCUS  •  LOOKAHEAD +29%", "small", GREEN, pos=(width - 225, 105))
         if counting_down:
@@ -846,12 +1035,12 @@ class AutoBeatApp:
             self.text(self.session.latest_judgment.value, "h1", JUDGMENT_COLORS[self.session.latest_judgment], center=(width // 2, height // 2))
         if time.perf_counter() < self.combo_banner_until:
             self.text(self.combo_banner, "title", MAGENTA, center=(width // 2, height // 2 - 75))
-        if self.audio.paused:
+        if self.game_paused:
             self.panel(pygame.Rect(width // 2 - 205, height // 2 - 130, 410, 260), (25, 35, 58), 16)
             self.text("PAUSED", "h1", YELLOW, center=(width // 2, height // 2 - 90))
             self.button("再開  [ESC]", pygame.Rect(width // 2 - 160, height // 2 - 48, 320, 42), self.toggle_pause, accent=GREEN)
             self.button("リトライ  [R]", pygame.Rect(width // 2 - 160, height // 2 + 6, 320, 42), self.retry_game, accent=CYAN)
-            self.button("楽曲選択へ  [Q]", pygame.Rect(width // 2 - 160, height // 2 + 60, 320, 42), self.return_to_song_select, accent=MUTED)
+            self.button("チュートリアルへ  [Q]" if self.tutorial_active else "楽曲選択へ  [Q]", pygame.Rect(width // 2 - 160, height // 2 + 60, 320, 42), self.return_to_song_select, accent=MUTED)
 
     def draw_result(self) -> None:
         if not self.session:
@@ -1104,6 +1293,8 @@ class AutoBeatApp:
         {
             "title": self.draw_title,
             "select": self.draw_select,
+            "tutorial": self.draw_tutorial,
+            "tutorial_result": self.draw_tutorial_result,
             "analyzing": self.draw_analyzing,
             "difficulty": self.draw_difficulty,
             "chart_summary": self.draw_chart_summary,
@@ -1133,10 +1324,27 @@ class AutoBeatApp:
         if self.screen == "title":
             if event.key in (pygame.K_RETURN, pygame.K_SPACE):
                 self.set_screen("select")
+            elif event.key == pygame.K_t:
+                self.set_screen("tutorial")
             elif event.key == pygame.K_g:
                 self.set_screen("gallery")
             elif event.key == pygame.K_s:
                 self.set_screen("settings")
+        elif self.screen == "tutorial":
+            if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                self.start_tutorial()
+            elif event.key == pygame.K_ESCAPE:
+                self.set_screen("title")
+        elif self.screen == "tutorial_result":
+            if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                if self.tutorial_step_index == len(TUTORIAL_STEPS) - 1:
+                    self.set_screen("title")
+                elif self.tutorial_step_index is not None:
+                    self.start_tutorial_step(self.tutorial_step_index + 1)
+            elif event.key == pygame.K_r:
+                self.retry_game()
+            elif event.key == pygame.K_ESCAPE:
+                self.return_to_song_select()
         elif self.screen == "difficulty":
             if event.key == pygame.K_UP:
                 self.selected_difficulty = max(0, self.selected_difficulty - 1)
@@ -1208,7 +1416,7 @@ class AutoBeatApp:
                 if event.key == pygame.K_ESCAPE:
                     self.return_to_song_select()
                 return
-            if self.audio.paused:
+            if self.game_paused:
                 if event.key == pygame.K_ESCAPE:
                     self.toggle_pause()
                 elif event.key == pygame.K_r:
@@ -1222,19 +1430,19 @@ class AutoBeatApp:
                     lane = self.settings["keys"].index(key)
                 except ValueError:
                     return
-                self._play_feedback(self.session.press(lane, self.audio.time) if self.session else None, lane)
+                self._play_feedback(self.session.press(lane, self.gameplay_time()) if self.session else None, lane)
         elif event.key == pygame.K_ESCAPE:
             self.set_screen("title")
 
     def key_up_event(self, event: pygame.event.Event) -> None:
-        if self.screen != "game" or not self.session or self.audio.paused:
+        if self.screen != "game" or not self.session or self.game_paused:
             return
         key = pygame.key.name(event.key).lower()
         try:
             lane = self.settings["keys"].index(key)
         except ValueError:
             return
-        self._play_feedback(self.session.release(lane, self.audio.time), lane)
+        self._play_feedback(self.session.release(lane, self.gameplay_time()), lane)
 
     def update_game(self) -> None:
         if self.screen != "game" or not self.session:
@@ -1246,12 +1454,19 @@ class AutoBeatApp:
                 self._start_after_countdown()
             except AudioClockError as error:
                 self.error = str(error)
-                self.screen = "difficulty"
+                self.screen = "tutorial" if self.tutorial_active else "difficulty"
             return
-        if self.audio.paused:
+        if self.game_paused:
             return
-        for judgment in self.session.tick(self.audio.time):
+        current_time = self.gameplay_time()
+        if self.tutorial_active:
+            self.update_tutorial_metronome(current_time)
+        for judgment in self.session.tick(current_time):
             self._play_feedback(judgment)
+        if self.tutorial_active:
+            if current_time >= self.chart.song_duration:
+                self.finish_game()
+            return
         # 最後のノーツが判定済みでも、曲末の余韻・無音区間・アウトロは再生し切る。
         # session.finished は譜面の終了、audio.finished は音源そのものの終了を表す。
         if self.audio.finished:

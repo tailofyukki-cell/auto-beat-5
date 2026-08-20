@@ -16,5 +16,20 @@ if %errorlevel% neq 0 (
   pause
   exit /b 1
 )
+echo Copying editable content folders...
+if exist "dist\AutoBeat5\rewards" rmdir /s /q "dist\AutoBeat5\rewards"
+if exist "dist\AutoBeat5\demo_songs" rmdir /s /q "dist\AutoBeat5\demo_songs"
+xcopy "rewards" "dist\AutoBeat5\rewards\" /E /I /Y >nul
+if %errorlevel% neq 0 (
+  echo ERROR: Failed to copy rewards folder.
+  pause
+  exit /b 1
+)
+xcopy "demo_songs" "dist\AutoBeat5\demo_songs\" /E /I /Y >nul
+if %errorlevel% neq 0 (
+  echo ERROR: Failed to copy demo_songs folder.
+  pause
+  exit /b 1
+)
 echo Build complete: dist\AutoBeat5\AutoBeat5.exe
 pause

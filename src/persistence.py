@@ -25,6 +25,7 @@ class AppPaths:
     cache: Path
     charts: Path
     rewards: Path
+    demo_songs: Path | None = None
 
     @classmethod
     def discover(cls) -> "AppPaths":
@@ -34,12 +35,16 @@ class AppPaths:
             root = Path(os.environ["APPDATA"]) / APP_NAME
         else:
             root = Path.home() / f".{APP_NAME.lower()}"
-        # 配布版ではexe隣接のrewards/を優先し、制作者が再ビルドせずに画像を差し替えられるようにする。
+        # 配布版ではexe隣接の素材フォルダを優先する。開発時のご褒美画像は従来どおりアプリデータ配下に置く。
         if getattr(sys, "frozen", False):
-            bundled_rewards = Path(sys.executable).resolve().parent / "rewards"
+            bundled_root = Path(sys.executable).resolve().parent
+            default_rewards = bundled_root / "rewards"
+            default_demo_songs = bundled_root / "demo_songs"
         else:
-            bundled_rewards = root / "rewards"
-        rewards = Path(os.environ.get("AUTOBEAT_REWARDS_DIR", bundled_rewards)).expanduser()
+            default_rewards = root / "rewards"
+            default_demo_songs = Path(__file__).resolve().parents[1] / "demo_songs"
+        rewards = Path(os.environ.get("AUTOBEAT_REWARDS_DIR", default_rewards)).expanduser()
+        demo_songs = Path(os.environ.get("AUTOBEAT_DEMO_SONGS_DIR", default_demo_songs)).expanduser()
         return cls(
             root=root,
             settings=root / "settings.json",
@@ -47,10 +52,14 @@ class AppPaths:
             cache=root / "cache",
             charts=root / "charts",
             rewards=rewards,
+            demo_songs=demo_songs,
         )
 
     def ensure(self) -> None:
-        for directory in (self.root, self.cache, self.charts, self.rewards):
+        directories = (self.root, self.cache, self.charts, self.rewards)
+        if self.demo_songs is not None:
+            directories = (*directories, self.demo_songs)
+        for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
 
 
@@ -75,6 +84,7 @@ DEFAULT_PROFILE: dict[str, Any] = {
     "last_play_ranking": {},
     "play_history": [],
     "recent_songs": [],
+    "tutorial_completed": False,
 }
 
 
