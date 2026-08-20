@@ -70,6 +70,8 @@ PLAYFIELD_MODES: dict[str, tuple[str, float]] = {
 }
 JUDGMENT_COLORS = {Judgment.PERFECT: CYAN, Judgment.GREAT: GREEN, Judgment.GOOD: YELLOW, Judgment.MISS: RED}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac"}
+LIBRARY_VISIBLE_ROWS = 6
+LIBRARY_ROW_HEIGHT = 72
 
 
 @dataclass(slots=True)
@@ -135,6 +137,8 @@ class AutoBeatApp:
         self.worker: AnalysisWorker | None = None
         self.progress = AnalysisProgress(0, "")
         self.selected_difficulty = 0
+        self.library_scroll_index = 0
+        self.library_selected_index = 0
         self.session: GameSession | None = None
         self.audio = AudioClock()
         self.tutorial_step_index: int | None = None
@@ -492,6 +496,59 @@ class AutoBeatApp:
         self.error = ""
         self.message = "体験版の同梱キャッシュを読み込みました。"
         self.screen = "difficulty"
+
+    def library_entries(self) -> list[dict[str, object]]:
+        """プロフィールに保存された解析済み楽曲を、安全に一覧化する。"""
+        entries = self.profile.get("recent_songs", [])
+        if not isinstance(entries, list):
+            return []
+        return [entry for entry in entries if isinstance(entry, dict)]
+
+    def _clamp_library_position(self) -> None:
+        entries = self.library_entries()
+        if not entries:
+            self.library_scroll_index = 0
+            self.library_selected_index = 0
+            return
+        self.library_selected_index = max(0, min(self.library_selected_index, len(entries) - 1))
+        max_scroll = max(0, len(entries) - LIBRARY_VISIBLE_ROWS)
+        self.library_scroll_index = max(0, min(self.library_scroll_index, max_scroll))
+        if self.library_selected_index < self.library_scroll_index:
+            self.library_scroll_index = self.library_selected_index
+        elif self.library_selected_index >= self.library_scroll_index + LIBRARY_VISIBLE_ROWS:
+            self.library_scroll_index = self.library_selected_index - LIBRARY_VISIBLE_ROWS + 1
+
+    def open_library(self) -> None:
+        self._clamp_library_position()
+        self.screen = "library"
+
+    def scroll_library(self, delta: int) -> None:
+        entries = self.library_entries()
+        if not entries:
+            return
+        max_scroll = max(0, len(entries) - LIBRARY_VISIBLE_ROWS)
+        self.library_scroll_index = max(0, min(self.library_scroll_index + delta, max_scroll))
+        first_visible = self.library_scroll_index
+        last_visible = min(len(entries) - 1, first_visible + LIBRARY_VISIBLE_ROWS - 1)
+        self.library_selected_index = max(first_visible, min(self.library_selected_index, last_visible))
+
+    def move_library_selection(self, delta: int) -> None:
+        entries = self.library_entries()
+        if not entries:
+            return
+        self.library_selected_index = max(0, min(self.library_selected_index + delta, len(entries) - 1))
+        self._clamp_library_position()
+
+    def select_library_entry(self, index: int) -> None:
+        entries = self.library_entries()
+        if not (0 <= index < len(entries)):
+            return
+        self.library_selected_index = index
+        self._clamp_library_position()
+        self.load_recent_song(entries[index])
+
+    def select_current_library_entry(self) -> None:
+        self.select_library_entry(self.library_selected_index)
 
     def load_recent_song(self, entry: dict[str, object]) -> None:
         path = Path(str(entry.get("source_path", ""))).expanduser()
@@ -871,24 +928,70 @@ class AutoBeatApp:
                 self.buttons.append((rect, lambda selected_demo=demo: self.load_demo_song(selected_demo)))
                 y += 56
 
-        recent = self.profile.get("recent_songs", [])[: (1 if demos else 4)]
+        recent = self.library_entries()
         if recent:
             self.text("RECENT LIBRARY", "body", YELLOW, pos=(125, y))
             y += 31
-            for entry in recent:
-                rect = pygame.Rect(120, y, width - 240, 54)
-                self.panel(rect, PANEL_DARK, 7)
-                song_name = Path(str(entry.get("source_path", ""))).name or "不明な楽曲"
-                digest = str(entry.get("music_hash", ""))
-                self.text(song_name, "small", WHITE, pos=(rect.left + 14, rect.top + 7))
-                self.text(f"{float(entry.get('bpm', 0.0)):.1f} BPM   {float(entry.get('duration', 0.0)):.1f} sec", "small", MUTED, pos=(rect.right - 220, rect.top + 7))
-                self.text(f"BEST  {self._song_best_text(digest)}", "small", CYAN if song_ranking_summary(self.profile, digest) else MUTED, pos=(rect.left + 14, rect.top + 29))
-                self.buttons.append((rect, lambda selected_entry=entry: self.load_recent_song(selected_entry)))
-                y += 60
+            self.button(f"ライブラリーを開く  {len(recent)} 曲  [L]", pygame.Rect(120, y, width - 240, 48), self.open_library, accent=YELLOW)
         elif not demos:
             self.text("解析した楽曲は、ここから再選択できます。", "small", MUTED, center=(width // 2, 410))
             self.text("demo_songs フォルダへ制作者のデモ曲を追加できます。", "small", GREEN, center=(width // 2, 440))
         self.button("戻る", pygame.Rect(50, height - 72, 140, 40), lambda: self.set_screen("title"), accent=MUTED)
+
+    def draw_library(self) -> None:
+        width, height = self.size
+        entries = self.library_entries()
+        self._clamp_library_position()
+        self.heading(
+            "RECENT LIBRARY",
+            f"解析済み {len(entries)} 曲  ・  マウスホイール / ↑↓ / PageUp・PageDownでスクロール  ・  Enterで選択",
+        )
+        list_rect = pygame.Rect(100, 145, width - 200, LIBRARY_VISIBLE_ROWS * LIBRARY_ROW_HEIGHT + 16)
+        self.panel(list_rect)
+        if not entries:
+            self.text("解析済みの楽曲はまだありません。", "body", MUTED, center=(width // 2, list_rect.centery))
+        else:
+            visible = entries[self.library_scroll_index : self.library_scroll_index + LIBRARY_VISIBLE_ROWS]
+            for offset, entry in enumerate(visible):
+                index = self.library_scroll_index + offset
+                row = pygame.Rect(list_rect.left + 16, list_rect.top + 8 + offset * LIBRARY_ROW_HEIGHT, list_rect.width - 52, LIBRARY_ROW_HEIGHT - 8)
+                selected = index == self.library_selected_index
+                self.panel(row, PANEL if selected else PANEL_DARK, 7)
+                if selected:
+                    pygame.draw.rect(self.surface, CYAN, pygame.Rect(row.left, row.top + 6, 4, row.height - 12), border_radius=2)
+                source_path = Path(str(entry.get("source_path", "")))
+                song_name = source_path.name or "不明な楽曲"
+                digest = str(entry.get("music_hash", ""))
+                exists = source_path.is_file()
+                self.text(f"{index + 1:02d}. {song_name}", "body", WHITE, pos=(row.left + 16, row.top + 9))
+                self.text(
+                    f"{float(entry.get('bpm', 0.0)):.1f} BPM   {float(entry.get('duration', 0.0)):.1f} sec",
+                    "small",
+                    MUTED,
+                    pos=(row.right - 225, row.top + 12),
+                )
+                summary_color = CYAN if song_ranking_summary(self.profile, digest) else MUTED
+                self.text(f"BEST  {self._song_best_text(digest)}", "small", summary_color, pos=(row.left + 16, row.top + 38))
+                if not exists:
+                    self.text("FILE MISSING", "small", RED, pos=(row.right - 122, row.top + 38))
+                self.buttons.append((row, lambda selected_index=index: self.select_library_entry(selected_index)))
+
+            if len(entries) > LIBRARY_VISIBLE_ROWS:
+                track = pygame.Rect(list_rect.right - 22, list_rect.top + 12, 8, list_rect.height - 24)
+                pygame.draw.rect(self.surface, PANEL_DARK, track, border_radius=4)
+                thumb_height = max(30, int(track.height * LIBRARY_VISIBLE_ROWS / len(entries)))
+                max_scroll = len(entries) - LIBRARY_VISIBLE_ROWS
+                progress = self.library_scroll_index / max_scroll if max_scroll else 0.0
+                thumb_top = track.top + int((track.height - thumb_height) * progress)
+                pygame.draw.rect(self.surface, YELLOW, pygame.Rect(track.left, thumb_top, track.width, thumb_height), border_radius=4)
+
+        self.text(
+            f"{self.library_scroll_index + 1 if entries else 0}-{min(len(entries), self.library_scroll_index + LIBRARY_VISIBLE_ROWS)} / {len(entries)}",
+            "small",
+            MUTED,
+            center=(width // 2, height - 112),
+        )
+        self.button("選曲へ  [ESC]", pygame.Rect(50, height - 72, 180, 40), lambda: self.set_screen("select"), accent=MUTED)
 
     def draw_tutorial(self) -> None:
         width, height = self.size
@@ -1358,6 +1461,7 @@ class AutoBeatApp:
         {
             "title": self.draw_title,
             "select": self.draw_select,
+            "library": self.draw_library,
             "tutorial": self.draw_tutorial,
             "tutorial_result": self.draw_tutorial_result,
             "analyzing": self.draw_analyzing,
@@ -1395,6 +1499,30 @@ class AutoBeatApp:
                 self.set_screen("gallery")
             elif event.key == pygame.K_s:
                 self.set_screen("settings")
+        elif self.screen == "select":
+            if event.key == pygame.K_l:
+                self.open_library()
+            elif event.key == pygame.K_ESCAPE:
+                self.set_screen("title")
+        elif self.screen == "library":
+            if event.key == pygame.K_UP:
+                self.move_library_selection(-1)
+            elif event.key == pygame.K_DOWN:
+                self.move_library_selection(1)
+            elif event.key == pygame.K_PAGEUP:
+                self.move_library_selection(-LIBRARY_VISIBLE_ROWS)
+            elif event.key == pygame.K_PAGEDOWN:
+                self.move_library_selection(LIBRARY_VISIBLE_ROWS)
+            elif event.key == pygame.K_HOME:
+                self.library_selected_index = 0
+                self._clamp_library_position()
+            elif event.key == pygame.K_END:
+                self.library_selected_index = max(0, len(self.library_entries()) - 1)
+                self._clamp_library_position()
+            elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                self.select_current_library_entry()
+            elif event.key == pygame.K_ESCAPE:
+                self.set_screen("select")
         elif self.screen == "tutorial":
             if event.key in (pygame.K_RETURN, pygame.K_SPACE):
                 self.start_tutorial()
@@ -1544,6 +1672,8 @@ class AutoBeatApp:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
+                elif event.type == pygame.MOUSEWHEEL and self.screen == "library":
+                    self.scroll_library(-event.y)
                 elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                     for rect, action in self.buttons:
                         if rect.collidepoint(event.pos):

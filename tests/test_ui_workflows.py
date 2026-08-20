@@ -101,6 +101,38 @@ class UiWorkflowTest(unittest.TestCase):
         # 1280×720時の旧フィールド高525pxより広く、解像度は変更しない。
         self.assertGreater(judgment_y - field_top, 525)
 
+    def test_library_scrolls_selects_and_draws_many_recent_songs(self) -> None:
+        entries = [
+            {
+                "source_path": f"C:/Music/Library Song {index:02d}.wav",
+                "music_hash": f"{index:064x}",
+                "bpm": 120.0 + index,
+                "duration": 90.0 + index,
+            }
+            for index in range(14)
+        ]
+        self.app.profile["recent_songs"] = entries
+        self.app.open_library()
+        self.assertEqual(self.app.screen, "library")
+        self.assertEqual(self.app.library_scroll_index, 0)
+        self.assertEqual(self.app.library_selected_index, 0)
+
+        self.app.scroll_library(99)
+        self.assertEqual(self.app.library_scroll_index, 8)
+        self.assertEqual(self.app.library_selected_index, 8)
+        self.app.key_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_END))
+        self.assertEqual(self.app.library_selected_index, 13)
+        self.assertEqual(self.app.library_scroll_index, 8)
+        self.app.key_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_HOME))
+        self.assertEqual(self.app.library_selected_index, 0)
+        self.assertEqual(self.app.library_scroll_index, 0)
+        self.app.draw()
+
+        selected: list[dict[str, object]] = []
+        self.app.load_recent_song = lambda entry: selected.append(entry)  # type: ignore[method-assign]
+        self.app.select_library_entry(11)
+        self.assertEqual(selected, [entries[11]])
+
     def test_old_easy_cache_is_regenerated_without_chords(self) -> None:
         analysis = AnalysisResult(
             music_hash="c" * 64,
