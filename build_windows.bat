@@ -31,5 +31,11 @@ if %errorlevel% neq 0 (
   pause
   exit /b 1
 )
+copy /Y "TRIAL_README.txt" "dist\AutoBeat5\TRIAL_README.txt" >nul
+if %errorlevel% neq 0 (
+  echo ERROR: Failed to copy trial README.
+  pause
+  exit /b 1
+)
 echo Build complete: dist\AutoBeat5\AutoBeat5.exe
 pause

@@ -48,7 +48,7 @@ def scan_rewards(paths: AppPaths, unlocked_names: set[str]) -> list[RewardImage]
             name=image.name,
             path=image,
             required_score=thresholds.get(image.name),
-            unlocked=image.name in unlocked_names,
+            unlocked=image.name in unlocked_names or thresholds.get(image.name) == 0,
         )
         for image in sorted(images, key=lambda item: item.name.lower())
     ]

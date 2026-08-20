@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -14,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import pygame
 from app import AutoBeatApp
+from chart_generator import ChartGenerator
+from models import AnalysisResult, Chart, Difficulty, Note
 from tutorial import TUTORIAL_STEPS, build_tutorial_chart
 
 
@@ -84,6 +88,52 @@ class TutorialTest(unittest.TestCase):
         self.assertEqual([path.name for path in self.app.demo_song_files()], ["alpha.wav", "beta.ogg"])
         self.app.screen = "select"
         self.app.draw()
+
+    def test_zero_score_reward_is_unlocked_without_a_play_record(self) -> None:
+        image_path = self.app.paths.rewards / "trial_welcome.png"
+        image = pygame.Surface((16, 16), pygame.SRCALPHA)
+        image.fill((80, 220, 160, 255))
+        pygame.image.save(image, str(image_path))
+        (self.app.paths.rewards / "reward_config.json").write_text(
+            '{"trial_welcome.png": {"required_score": 0}}', encoding="utf-8"
+        )
+        reward = next(item for item in self.app.gallery_rewards() if item.name == "trial_welcome.png")
+        self.assertTrue(reward.unlocked)
+
+    def test_bundled_demo_cache_opens_without_first_time_analysis(self) -> None:
+        demo = self.app.paths.demo_songs / "trial.wav"
+        demo.write_bytes(b"demo audio bytes")
+        digest = "d" * 64
+        analysis = AnalysisResult(
+            music_hash=digest,
+            source_path=str(demo),
+            duration=4.0,
+            sample_rate=22050,
+            bpm=120.0,
+            beats=[0.0, 0.5, 1.0, 1.5],
+            onsets=[1.0],
+            onset_strengths=[1.0],
+            band_energy=[[0.2, 0.2, 0.2, 0.2, 0.2]],
+            percussive_strengths=[1.0],
+            sustained_segments=[],
+        )
+        cache = self.app.paths.demo_songs / "cache" / f"{digest}.json"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(analysis.to_dict()), encoding="utf-8")
+        chart = Chart(1, digest, Difficulty.BEGINNER, 0, 4.0, notes=[Note(1.0, 2)], generator_version=ChartGenerator.VERSION)
+        chart_path = self.app.paths.demo_songs / "charts" / digest / "beginner.json"
+        chart_path.parent.mkdir(parents=True, exist_ok=True)
+        chart_path.write_text(json.dumps(chart.to_dict()), encoding="utf-8")
+
+        with patch("app.music_hash", return_value=digest):
+            self.app.load_demo_song(demo)
+            self.assertEqual(self.app.screen, "difficulty")
+            self.assertEqual(self.app.message, "体験版の同梱キャッシュを読み込みました。")
+            self.app.select_chart(Difficulty.BEGINNER)
+        self.assertEqual(self.app.screen, "chart_summary")
+        self.assertIsNotNone(self.app.chart)
+        self.assertEqual(len(self.app.chart.notes), 1)
+        self.assertTrue(self.app.message.startswith("体験版の同梱BEGINNER譜面"))
 
 
 if __name__ == "__main__":

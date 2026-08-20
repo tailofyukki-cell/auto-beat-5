@@ -1,4 +1,7 @@
 {
+  "musical_trophy.png": {
+    "required_score": 0
+  },
   "reward_001.png": {
     "required_score": 100000
   },

@@ -1,6 +1,7 @@
 """AutoBeat 5 のPygameアプリケーション。"""
 from __future__ import annotations
 
+import json
 import math
 import os
 import sys
@@ -19,7 +20,7 @@ from chart_generator import ChartGenerator
 from chart_summary import build_chart_summary
 from chart_validator import ChartValidator
 from gameplay import GameSession, JudgmentWindows
-from models import Chart, Difficulty, Judgment, LANE_NAMES
+from models import AnalysisResult, Chart, Difficulty, Judgment, LANE_NAMES
 from persistence import (
     AppPaths,
     load_analysis,
@@ -430,8 +431,67 @@ class AutoBeatApp:
         except OSError:
             return []
 
+    def is_demo_song(self, path: Path | None = None) -> bool:
+        """同梱デモ曲かどうかを、フォルダ境界を解決して判定する。"""
+        folder = self.paths.demo_songs
+        candidate = path or self.song_path
+        if folder is None or candidate is None:
+            return False
+        try:
+            return candidate.resolve().parent == folder.resolve()
+        except OSError:
+            return False
+
+    def _load_demo_analysis(self, path: Path) -> AnalysisResult | None:
+        """配布物に入れた解析キャッシュを検証して読み込む。壊れていれば通常解析へ戻す。"""
+        folder = self.paths.demo_songs
+        if folder is None:
+            return None
+        try:
+            digest = music_hash(path)
+            cache_file = folder / "cache" / f"{digest}.json"
+            if not cache_file.is_file():
+                return None
+            analysis = AnalysisResult.from_dict(json.loads(cache_file.read_text(encoding="utf-8")))
+            if analysis.music_hash != digest or analysis.analyzer_version != MusicAnalyzer.VERSION:
+                return None
+            analysis.source_path = str(path.resolve())
+            return analysis
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return None
+
+    def _load_demo_chart(self, difficulty: Difficulty) -> Chart | None:
+        folder = self.paths.demo_songs
+        if folder is None or self.analysis is None:
+            return None
+        try:
+            chart_file = folder / "charts" / self.analysis.music_hash / f"{difficulty.value}.json"
+            if not chart_file.is_file():
+                return None
+            chart = Chart.from_dict(json.loads(chart_file.read_text(encoding="utf-8")))
+            if chart.music_hash != self.analysis.music_hash or chart.generator_version != ChartGenerator.VERSION:
+                return None
+            return chart
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return None
+
     def load_demo_song(self, path: Path) -> None:
-        self.select_song_path(path)
+        if not path.is_file():
+            self.error = "同梱デモ曲が見つかりません。"
+            return
+        analysis = self._load_demo_analysis(path)
+        if analysis is None:
+            self.message = "同梱キャッシュを確認できないため、デモ曲を解析します。"
+            self.select_song_path(path)
+            return
+        self.song_path = path
+        self.analysis = analysis
+        self.chart = None
+        self.committed_chart = None
+        self.pending_chart = None
+        self.error = ""
+        self.message = "体験版の同梱キャッシュを読み込みました。"
+        self.screen = "difficulty"
 
     def load_recent_song(self, entry: dict[str, object]) -> None:
         path = Path(str(entry.get("source_path", ""))).expanduser()
@@ -518,10 +578,15 @@ class AutoBeatApp:
             return
         self.selected_difficulty = list(Difficulty).index(difficulty)
         chart = load_chart(self.paths, self.analysis.music_hash, difficulty.value)
+        if chart is None and self.is_demo_song():
+            chart = self._load_demo_chart(difficulty)
+            if chart is not None:
+                save_chart(self.paths, chart)
+                self.message = f"体験版の同梱{difficulty.label}譜面を読み込みました（{len(chart.notes)}ノーツ）。"
         if chart is None or chart.generator_version != ChartGenerator.VERSION:
             chart = self._generate_chart(difficulty, variant=0)
             self.message = f"{difficulty.label}譜面を生成しました（{len(chart.notes)}ノーツ）。"
-        else:
+        elif not self.message.startswith("体験版の同梱"):
             self.message = f"{difficulty.label}譜面キャッシュを読み込みました。"
         self.chart = chart
         self.committed_chart = chart
@@ -794,7 +859,7 @@ class AutoBeatApp:
         self.button("音楽ファイルを選択", pygame.Rect(width // 2 - 190, 270, 380, 42), self.choose_file)
 
         y = 342
-        demos = self.demo_song_files()[:2]
+        demos = self.demo_song_files()[:3]
         if demos:
             self.text("DEMO SONGS", "body", GREEN, pos=(125, y))
             y += 31
