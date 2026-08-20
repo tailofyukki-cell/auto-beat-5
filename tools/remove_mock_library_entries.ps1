@@ -31,10 +31,16 @@ foreach ($collectionName in @('rankings', 'high_scores')) {
     }
 }
 
+$mockHistory = @($profile.play_history | Where-Object {
+    $key = [string]$_.chart_key
+    $fakeHashes | Where-Object { $key.StartsWith("${_}:") }
+})
+$mockScore = [long](@($mockHistory | Measure-Object -Property score -Sum).Sum)
 $profile.play_history = @($profile.play_history | Where-Object {
-    $key = [string]$_.chart_hash
+    $key = [string]$_.chart_key
     -not ($fakeHashes | Where-Object { $key.StartsWith("${_}:") })
 })
+$profile.lifetime_score = [math]::Max(0, [long]$profile.lifetime_score - $mockScore)
 
 if ($profile.last_play_ranking) {
     $key = [string]$profile.last_play_ranking.chart_key
@@ -44,4 +50,4 @@ if ($profile.last_play_ranking) {
 }
 
 $profile | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $profilePath -Encoding utf8
-Write-Output "Removed mock library entries. Backup: $backupPath"
+Write-Output "Removed mock library entries and $($mockHistory.Count) mock play records (score total: $mockScore). Backup: $backupPath"
