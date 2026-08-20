@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -52,8 +53,19 @@ class MusicAnalyzer:
         self._report(0.05, "音源を読み込んでいます")
         try:
             signal, sample_rate = librosa.load(str(source), sr=self.SAMPLE_RATE, mono=True)
-        except Exception as error:  # ライブラリ例外をそのままUIへ漏らさない
-            raise AnalysisError("音源をデコードできませんでした。ファイルの破損または非対応コーデックの可能性があります。") from error
+        except Exception as primary_error:  # ライブラリ例外をそのままUIへ漏らさない
+            # PyInstaller環境などでsoundfile/codec初期化に失敗しても、標準PCM WAVは直接復元できる。
+            if source.suffix.lower() == ".wav":
+                try:
+                    signal, sample_rate = self._load_pcm_wav(source, librosa)
+                except Exception as fallback_error:
+                    raise AnalysisError(
+                        "WAV音源を読み込めませんでした。PCM形式で保存し直すか、別の音声形式を選択してください。"
+                    ) from fallback_error
+            else:
+                raise AnalysisError(
+                    "音源をデコードできませんでした。ファイルの破損または非対応コーデックの可能性があります。"
+                ) from primary_error
         if signal.size < self.HOP_LENGTH:
             raise AnalysisError("音源が短すぎるため解析できません。")
 
@@ -149,6 +161,42 @@ class MusicAnalyzer:
         )
         self._report(1.0, "解析が完了しました")
         return result
+
+    def _load_pcm_wav(self, source: Path, librosa: object) -> tuple[np.ndarray, int]:
+        """外部デコーダーが利用できない場合に、非圧縮PCM WAVを標準ライブラリで復元する。"""
+        with wave.open(str(source), "rb") as audio:
+            if audio.getcomptype() != "NONE":
+                raise AnalysisError("圧縮WAVは標準PCM代替デコーダーでは扱えません。")
+            channels = audio.getnchannels()
+            sample_width = audio.getsampwidth()
+            sample_rate = audio.getframerate()
+            frame_count = audio.getnframes()
+            if channels <= 0 or sample_rate <= 0 or sample_width not in {1, 2, 3, 4}:
+                raise AnalysisError("標準PCM WAVの形式情報が不正です。")
+            raw = audio.readframes(frame_count)
+
+        if sample_width == 1:
+            values = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+        elif sample_width == 2:
+            values = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+        elif sample_width == 3:
+            packed = np.frombuffer(raw, dtype=np.uint8)
+            if len(packed) % 3:
+                raise AnalysisError("24ビットPCM WAVのデータ長が不正です。")
+            triples = packed.reshape(-1, 3).astype(np.int32)
+            integers = triples[:, 0] | (triples[:, 1] << 8) | (triples[:, 2] << 16)
+            integers = np.where(integers & 0x800000, integers - 0x1000000, integers)
+            values = integers.astype(np.float32) / 8388608.0
+        else:
+            values = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
+
+        if len(values) % channels:
+            raise AnalysisError("PCM WAVのチャンネルデータ長が不正です。")
+        signal = values.reshape(-1, channels).mean(axis=1, dtype=np.float32)
+        if sample_rate != self.SAMPLE_RATE:
+            signal = librosa.resample(signal, orig_sr=sample_rate, target_sr=self.SAMPLE_RATE)
+            sample_rate = self.SAMPLE_RATE
+        return np.asarray(signal, dtype=np.float32), int(sample_rate)
 
     @staticmethod
     def _local_bpm_pairs(beat_times: np.ndarray, fallback_bpm: float) -> list[tuple[float, float]]:

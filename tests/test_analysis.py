@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import wave
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,16 @@ class AnalysisTest(unittest.TestCase):
         self.assertEqual(len(result.onsets), len(result.percussive_strengths))
         self.assertGreater(len(result.local_bpms), 0)
         self.assertGreater(len(result.downbeats), 0)
+
+    def test_pcm_wav_fallback_runs_when_librosa_load_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "fallback_fixture.wav"
+            self.make_fixture(fixture)
+            with patch("librosa.load", side_effect=RuntimeError("simulated decoder failure")):
+                result = MusicAnalyzer().analyze(fixture)
+        self.assertGreater(result.duration, 3.9)
+        self.assertGreater(result.bpm, 40)
+        self.assertGreater(len(result.onsets), 2)
 
 
 if __name__ == "__main__":
