@@ -18,6 +18,7 @@ import pygame
 from app import AutoBeatApp
 from chart_generator import ChartGenerator
 from models import AnalysisResult, Chart, Difficulty, Note
+from rewards import reward_progress
 from tutorial import TUTORIAL_STEPS, build_tutorial_chart
 
 
@@ -99,6 +100,37 @@ class TutorialTest(unittest.TestCase):
         )
         reward = next(item for item in self.app.gallery_rewards() if item.name == "trial_welcome.png")
         self.assertTrue(reward.unlocked)
+
+    def test_reward_progress_unlocks_by_lifetime_score_and_ignores_missing_images(self) -> None:
+        for name, color in (("score_100.png", (80, 220, 160, 255)), ("score_300.png", (90, 170, 255, 255))):
+            image = pygame.Surface((16, 16), pygame.SRCALPHA)
+            image.fill(color)
+            pygame.image.save(image, str(self.app.paths.rewards / name))
+        (self.app.paths.rewards / "reward_config.json").write_text(
+            json.dumps(
+                {
+                    "score_100.png": {"required_score": 100000},
+                    "score_300.png": {"required_score": 300000},
+                    "missing_image.png": {"required_score": 200000},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.app.profile["lifetime_score"] = 75000
+        status = reward_progress(self.app.paths, self.app.profile)
+        self.assertEqual(status.reward_count, 2)
+        self.assertEqual(status.unlocked_count, 0)
+        self.assertEqual(status.next_reward.name if status.next_reward else None, "score_100.png")
+        self.assertEqual(status.remaining_score, 25000)
+        self.assertAlmostEqual(status.progress_ratio, 0.75)
+
+        self.app.profile["lifetime_score"] = 100000
+        status = reward_progress(self.app.paths, self.app.profile)
+        self.assertEqual(status.unlocked_count, 1)
+        self.assertEqual(status.next_reward.name if status.next_reward else None, "score_300.png")
+        self.assertEqual(status.remaining_score, 200000)
+        self.assertTrue(next(item for item in self.app.gallery_rewards() if item.name == "score_100.png").unlocked)
 
     def test_bundled_demo_cache_opens_without_first_time_analysis(self) -> None:
         demo = self.app.paths.demo_songs / "trial.wav"

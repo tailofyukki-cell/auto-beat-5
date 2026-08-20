@@ -37,7 +37,7 @@ from persistence import (
     save_profile,
     save_settings,
 )
-from rewards import RewardImage, ensure_reward_template, scan_rewards
+from rewards import RewardImage, RewardProgress, ensure_reward_template, reward_progress, scan_rewards
 from tutorial import TUTORIAL_BEAT_SECONDS, TUTORIAL_STEPS, build_tutorial_chart
 
 
@@ -869,7 +869,53 @@ class AutoBeatApp:
         self.set_screen("gallery_preview")
 
     def gallery_rewards(self) -> list[RewardImage]:
-        return scan_rewards(self.paths, set(self.profile.get("unlocked_rewards", [])))
+        return scan_rewards(
+            self.paths,
+            set(self.profile.get("unlocked_rewards", [])),
+            lifetime_score=int(self.profile.get("lifetime_score", 0)),
+        )
+
+    def reward_status(self) -> RewardProgress:
+        """リザルト・解放画面・ギャラリーで共通利用する累積スコア進捗。"""
+        return reward_progress(self.paths, self.profile)
+
+    def draw_reward_progress(self, rect: pygame.Rect, *, compact: bool = False) -> RewardProgress:
+        """累積スコアと次の画像解放までの距離を横長の進捗表示として描画する。"""
+        status = self.reward_status()
+        self.panel(rect, PANEL_DARK, 8)
+        if compact:
+            self.text(
+                f"REWARD SCORE  {status.lifetime_score:,} pts  ·  {status.unlocked_count}/{status.reward_count} unlocked",
+                "small",
+                WHITE,
+                pos=(rect.left + 18, rect.top + 10),
+            )
+        else:
+            self.text("REWARD SCORE", "small", MAGENTA, pos=(rect.left + 18, rect.top + 16))
+            self.text(
+                f"{status.lifetime_score:,} pts  ·  {status.unlocked_count}/{status.reward_count} unlocked",
+                "small",
+                WHITE,
+                pos=(rect.left + 18, rect.top + 39),
+            )
+        if status.next_reward is None or status.next_required_score is None:
+            message = "すべての設定済み画像を解放済みです" if status.reward_count else "rewards フォルダへ画像を追加すると解放目標を作れます"
+            self.text(message, "small", GREEN, pos=(rect.left + 18, rect.top + (38 if compact else 64)))
+            return status
+
+        bar_left = rect.left + 18
+        bar_width = rect.width - 36
+        bar_top = rect.top + (55 if compact else rect.height - 28)
+        pygame.draw.rect(self.surface, (50, 66, 94), pygame.Rect(bar_left, bar_top, bar_width, 9), border_radius=4)
+        filled = max(2, int(bar_width * status.progress_ratio))
+        pygame.draw.rect(self.surface, MAGENTA, pygame.Rect(bar_left, bar_top, filled, 9), border_radius=4)
+        self.text(
+            f"NEXT  {status.next_reward.name}  ·  あと {status.remaining_score:,} pts",
+            "small",
+            YELLOW,
+            pos=(rect.left + 18, rect.top + (32 if compact else rect.height - 54)),
+        )
+        return status
 
     def _load_scaled_reward(self, reward: RewardImage, max_width: int, max_height: int) -> pygame.Surface | None:
         try:
@@ -1232,6 +1278,7 @@ class AutoBeatApp:
             self.panel(pygame.Rect(width // 2 - 320 + index * 165, 380, 150, 78))
             self.text(label, "small", MUTED, center=(width // 2 - 245 + index * 165, 405))
             self.text(str(result.judgments[label]), "h1", center=(width // 2 - 245 + index * 165, 435))
+        self.draw_reward_progress(pygame.Rect(width // 2 - 320, 478, 640, 76), compact=True)
         if self.chart_is_pending:
             self.panel(pygame.Rect(width // 2 - 385, height - 190, 770, 46), (44, 61, 92), 10)
             self.text("試作候補をプレイしました。どちらを残しますか？", "body", YELLOW, center=(width // 2, height - 167))
@@ -1247,11 +1294,18 @@ class AutoBeatApp:
     def draw_unlock(self) -> None:
         width, height = self.size
         self.heading("NEW IMAGE UNLOCKED", "累積スコアにより新しいご褒美画像を解放しました")
-        self.text("解放済み", "h1", MAGENTA, center=(width // 2, 220))
+        self.text("解放済み", "h1", MAGENTA, center=(width // 2, 195))
         for index, name in enumerate(self.newly_unlocked[:3]):
-            self.text(name, "body", center=(width // 2, 280 + index * 34))
-        self.button("ギャラリーで見る", pygame.Rect(width // 2 - 170, height - 178, 340, 46), lambda: self.set_screen("gallery"), accent=MAGENTA)
-        self.button("リザルトを見る", pygame.Rect(width // 2 - 170, height - 120, 340, 46), lambda: self.set_screen("result"), accent=CYAN)
+            self.text(name, "body", center=(width // 2, 245 + index * 32))
+        unlocked_lookup = {reward.name: reward for reward in self.gallery_rewards()}
+        first_reward = unlocked_lookup.get(self.newly_unlocked[0]) if self.newly_unlocked else None
+        if first_reward is not None:
+            preview = self._load_scaled_reward(first_reward, 300, 190)
+            if preview is not None:
+                self.surface.blit(preview, preview.get_rect(center=(width // 2, 390)))
+        self.draw_reward_progress(pygame.Rect(width // 2 - 280, 492, 560, 76), compact=True)
+        self.button("ギャラリーで見る", pygame.Rect(width // 2 - 170, height - 118, 340, 42), lambda: self.set_screen("gallery"), accent=MAGENTA)
+        self.button("リザルトを見る", pygame.Rect(width // 2 - 170, height - 66, 340, 38), lambda: self.set_screen("result"), accent=CYAN)
 
     def draw_gallery(self) -> None:
         width, height = self.size
@@ -1259,7 +1313,9 @@ class AutoBeatApp:
         page_size = 8
         page_count = max(1, math.ceil(len(rewards) / page_size))
         self.gallery_page = max(0, min(self.gallery_page, page_count - 1))
-        self.heading("GALLERY", f"累積スコア: {self.profile.get('lifetime_score', 0):,}     {self.gallery_page + 1} / {page_count}")
+        status = self.reward_status()
+        next_text = "全画像を解放済み" if status.next_reward is None else f"次: {status.next_reward.name} まで {status.remaining_score:,} pts"
+        self.heading("GALLERY", f"累積 {status.lifetime_score:,} pts  ·  解放 {status.unlocked_count}/{status.reward_count}  ·  {next_text}")
         if not rewards:
             self.text("rewards フォルダへ PNG / JPEG / WebP を追加してください。", "body", MUTED, center=(width // 2, height // 2 - 20))
             self.text("reward_config.json で必要累積スコアを設定できます。", "small", MUTED, center=(width // 2, height // 2 + 20))

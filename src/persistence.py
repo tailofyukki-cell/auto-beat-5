@@ -298,7 +298,11 @@ def reward_thresholds(paths: AppPaths) -> dict[str, int]:
         return {
             str(name): int(value["required_score"])
             for name, value in raw.items()
-            if isinstance(value, dict) and int(value.get("required_score", -1)) >= 0
+            if (
+                isinstance(value, dict)
+                and int(value.get("required_score", -1)) >= 0
+                and (paths.rewards / str(name)).is_file()
+            )
         }
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
         return {}
