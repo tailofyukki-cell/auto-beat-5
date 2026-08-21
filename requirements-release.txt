@@ -1,0 +1,7 @@
+# AutoBeat 5 Windows release build environment.
+# Install only into .venv_release. Keep this file intentionally minimal.
+pygame==2.6.1
+librosa==0.11.0
+soundfile==0.13.1
+numpy==2.3.5
+PyInstaller==6.18.0

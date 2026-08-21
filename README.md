@@ -94,6 +94,10 @@ Windows上で`build_windows.bat`をダブルクリックすると、依存関係
 
 体験版ZIPを配布する場合は、必ず`build_trial_package.bat`を使用してください。このバッチは日本語ファイル名にUTF-8フラグを付ける`tools\package_trial_zip.py`を使い、Windowsの展開後も`demo_songs\ここから始まる～夜明けの光～.wav`のような日本語名を正しく維持します。`tar.exe`など、UTF-8ファイル名フラグを付与しない圧縮方法で体験版ZIPを作り直してはいけません。
 
+**販売候補（RC）を作る場合は、`build_sales_release.bat`だけを使用してください。** このバッチは`.venv_release`の固定依存環境で自動テスト、最小依存PyInstallerビルド、第三者ライセンス本文・SBOMの作成、UTF-8 ZIP化を順に実行します。完成した`release\AutoBeat5_Trial_Windows.zip`に対して、`tools\release_preflight.py`でライセンス、不要依存、日本語ファイル名、Windows展開、exe起動を検査します。手作業の再圧縮・別ツールでのZIP上書きは禁止です。
+
+販売候補を受け取るテスターは、[実機テスト手順](docs/sales_release_rc1_test_checklist.md)に従って、新しい空フォルダへ展開してテストしてください。
+
 ```text
 AutoBeat5\
 ├─ AutoBeat5.exe
@@ -117,9 +121,7 @@ SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy python -m unittest discover -s tests
 
 ## ライセンス
 
-技術選定の主要な根拠は、[Pygame LGPL][1]、[librosa ISC License][2]、[Godot Engine License][3]、[Unity Plans & Pricing][4]にまとめています。AutoBeat 5の配布前には、`licenses/THIRD_PARTY_NOTICES.md`を読み、最終バイナリに含まれる依存関係のライセンス本文を確認・同梱してください。
+AutoBeat 5の販売候補には、最終バイナリに実際に含まれる依存関係のライセンス本文とSBOMを`licenses/`へ同梱します。`licenses/INDEX.md`を入口として確認してください。Pygame LGPL本文、Noto Sans CJKのOFL本文、libsndfileのCOPYING、各Python依存のライセンス本文を収録します。
 
 [1]: https://www.pygame.org/docs/LGPL.txt "Pygame LGPL"
 [2]: https://github.com/librosa/librosa/blob/main/LICENSE.md "librosa LICENSE"
-[3]: https://godotengine.org/license/ "Godot Engine License"
-[4]: https://unity.com/products "Unity Plans & Pricing"

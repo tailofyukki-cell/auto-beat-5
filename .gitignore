@@ -2,10 +2,13 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv_release/
 .pytest_cache/
 
 # Build and release artifacts (share dist/ separately as a ZIP when needed)
 build/
+build_release/
+build_work_release/
 dist/
 build_trial_package/
 release/
