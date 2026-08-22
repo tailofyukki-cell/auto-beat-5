@@ -20,7 +20,7 @@ from chart_generator import ChartGenerator
 from chart_summary import build_chart_summary
 from chart_validator import ChartValidator
 from gameplay import GameSession, JudgmentWindows
-from models import AnalysisResult, Chart, Difficulty, Judgment, LANE_NAMES
+from models import AnalysisResult, Chart, Difficulty, Judgment, LANE_NAMES, Note
 from persistence import (
     AppPaths,
     load_analysis,
@@ -72,6 +72,10 @@ JUDGMENT_COLORS = {Judgment.PERFECT: CYAN, Judgment.GREAT: GREEN, Judgment.GOOD:
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac"}
 LIBRARY_VISIBLE_ROWS = 6
 LIBRARY_ROW_HEIGHT = 72
+PLAYLIST_VISIBLE_ROWS = 7
+PLAYLIST_ROW_HEIGHT = 62
+PRACTICE_MIN_DURATION = 3.0
+PRACTICE_DEFAULT_DURATION = 12.0
 REWARD_MANAGER_VISIBLE_ROWS = 6
 REWARD_MANAGER_ROW_HEIGHT = 58
 JUDGMENT_FEEDBACK_DURATION = 0.60
@@ -94,6 +98,23 @@ class JudgmentFeedback:
     judgment: Judgment
     started_at: float
     duration: float = JUDGMENT_FEEDBACK_DURATION
+
+
+@dataclass(slots=True)
+class PlaylistEntry:
+    """デモ曲と解析済みユーザー曲を同じ一覧へ載せる表示・選択用モデル。"""
+
+    music_hash: str
+    path: Path
+    source: str
+    exists: bool
+    bpm: float = 0.0
+    duration: float = 0.0
+    last_used: str = ""
+
+    @property
+    def source_label(self) -> str:
+        return {"demo": "DEMO", "library": "MY MUSIC", "both": "DEMO + MY MUSIC"}.get(self.source, "MY MUSIC")
 
 
 class AutoBeatApp:
@@ -151,6 +172,15 @@ class AutoBeatApp:
         self.selected_difficulty = 0
         self.library_scroll_index = 0
         self.library_selected_index = 0
+        self.playlist_scroll_index = 0
+        self.playlist_selected_index = 0
+        self.launch_mode = "normal"
+        self.practice_active = False
+        self.practice_start = 0.0
+        self.practice_end = 0.0
+        self.practice_loop = True
+        self.practice_round = 0
+        self.practice_best_accuracy = 0.0
         self.reward_manager_scroll_index = 0
         self.reward_manager_selected_index = 0
         self.session: GameSession | None = None
@@ -218,14 +248,14 @@ class AutoBeatApp:
         return max(0.0, end - self.tutorial_started_at)
 
     def _start_after_countdown(self) -> None:
-        """カウント終了後、通常曲またはチュートリアルの時計・判定を開始する。"""
+        """カウント終了後、通常曲・練習・チュートリアルの時計・判定を開始する。"""
         self.countdown_started_at = None
         if self.tutorial_active:
             self.tutorial_started_at = time.perf_counter()
             self.tutorial_paused_at = None
             self.tutorial_next_click_at = 0.0
         else:
-            self.audio.play()
+            self.audio.play(self.practice_start if self.practice_active else 0.0)
         self.start_banner_until = time.perf_counter() + 0.42
 
     @staticmethod
@@ -539,6 +569,115 @@ class AutoBeatApp:
         self.message = "体験版の同梱キャッシュを読み込みました。"
         self.screen = "difficulty"
 
+    def playlist_entries(self) -> list[PlaylistEntry]:
+        """同梱デモ曲とユーザー解析曲を、音源ハッシュ単位で一つの一覧へ統合する。"""
+        by_hash: dict[str, PlaylistEntry] = {}
+        folder = self.paths.demo_songs
+        manifest_file = folder / "demo_manifest.json" if folder is not None else None
+        try:
+            manifest_songs = json.loads(manifest_file.read_text(encoding="utf-8")).get("songs", []) if manifest_file and manifest_file.is_file() else []
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            manifest_songs = []
+        for raw in manifest_songs:
+            if not isinstance(raw, dict):
+                continue
+            path = folder / str(raw.get("file", "")) if folder is not None else Path()
+            digest = str(raw.get("music_hash", ""))
+            if not digest or path.suffix.lower() not in AUDIO_EXTENSIONS:
+                continue
+            by_hash[digest] = PlaylistEntry(
+                music_hash=digest,
+                path=path,
+                source="demo",
+                exists=path.is_file(),
+                bpm=float(raw.get("bpm", 0.0)),
+                duration=float(raw.get("duration", 0.0)),
+            )
+        # マニフェストがない開発時にも、フォルダ内のデモ曲は一覧へ残す。
+        for path in self.demo_song_files():
+            try:
+                digest = music_hash(path)
+            except OSError:
+                continue
+            by_hash.setdefault(digest, PlaylistEntry(digest, path, "demo", path.is_file()))
+        for entry in self.library_entries():
+            digest = str(entry.get("music_hash", ""))
+            path = Path(str(entry.get("source_path", ""))).expanduser()
+            if not digest:
+                continue
+            existing = by_hash.get(digest)
+            if existing is not None:
+                existing.source = "both"
+                # ユーザーが手元に置いた同じ曲を優先し、デモが欠損しても使えるようにする。
+                if path.is_file():
+                    existing.path = path
+                    existing.exists = True
+                existing.last_used = str(entry.get("last_used", ""))
+                continue
+            by_hash[digest] = PlaylistEntry(
+                music_hash=digest,
+                path=path,
+                source="library",
+                exists=path.is_file(),
+                bpm=float(entry.get("bpm", 0.0)),
+                duration=float(entry.get("duration", 0.0)),
+                last_used=str(entry.get("last_used", "")),
+            )
+        # 最近遊んだ曲を先頭へ。初回はデモマニフェストの順序を保つ。
+        return sorted(by_hash.values(), key=lambda item: item.last_used, reverse=True)
+
+    def _clamp_playlist_position(self) -> None:
+        entries = self.playlist_entries()
+        if not entries:
+            self.playlist_scroll_index = 0
+            self.playlist_selected_index = 0
+            return
+        self.playlist_selected_index = max(0, min(self.playlist_selected_index, len(entries) - 1))
+        max_scroll = max(0, len(entries) - PLAYLIST_VISIBLE_ROWS)
+        self.playlist_scroll_index = max(0, min(self.playlist_scroll_index, max_scroll))
+        if self.playlist_selected_index < self.playlist_scroll_index:
+            self.playlist_scroll_index = self.playlist_selected_index
+        elif self.playlist_selected_index >= self.playlist_scroll_index + PLAYLIST_VISIBLE_ROWS:
+            self.playlist_scroll_index = self.playlist_selected_index - PLAYLIST_VISIBLE_ROWS + 1
+
+    def open_playlist(self, launch_mode: str = "normal") -> None:
+        self.launch_mode = "practice" if launch_mode == "practice" else "normal"
+        self._clamp_playlist_position()
+        self.set_screen("select")
+
+    def scroll_playlist(self, delta: int) -> None:
+        entries = self.playlist_entries()
+        if not entries:
+            return
+        max_scroll = max(0, len(entries) - PLAYLIST_VISIBLE_ROWS)
+        self.playlist_scroll_index = max(0, min(self.playlist_scroll_index + delta, max_scroll))
+        self.playlist_selected_index = max(self.playlist_scroll_index, min(self.playlist_selected_index, self.playlist_scroll_index + PLAYLIST_VISIBLE_ROWS - 1))
+
+    def move_playlist_selection(self, delta: int) -> None:
+        entries = self.playlist_entries()
+        if not entries:
+            return
+        self.playlist_selected_index = max(0, min(self.playlist_selected_index + delta, len(entries) - 1))
+        self._clamp_playlist_position()
+
+    def select_playlist_entry(self, index: int) -> None:
+        entries = self.playlist_entries()
+        if not (0 <= index < len(entries)):
+            return
+        self.playlist_selected_index = index
+        self._clamp_playlist_position()
+        entry = entries[index]
+        if not entry.exists:
+            self.error = "この曲の音源ファイルが見つかりません。再リンク機能は次の更新で追加します。"
+            return
+        if entry.source in {"demo", "both"} and self.is_demo_song(entry.path):
+            self.load_demo_song(entry.path)
+            return
+        self.load_recent_song({"music_hash": entry.music_hash, "source_path": str(entry.path)})
+
+    def select_current_playlist_entry(self) -> None:
+        self.select_playlist_entry(self.playlist_selected_index)
+
     def library_entries(self) -> list[dict[str, object]]:
         """プロフィールに保存された解析済み楽曲を、安全に一覧化する。"""
         entries = self.profile.get("recent_songs", [])
@@ -753,7 +892,10 @@ class AutoBeatApp:
         self.chart = chart
         self.committed_chart = chart
         self.pending_chart = None
-        self.screen = "chart_summary"
+        if self.launch_mode == "practice":
+            self.open_practice_setup()
+        else:
+            self.screen = "chart_summary"
 
     @property
     def chart_is_pending(self) -> bool:
@@ -793,9 +935,90 @@ class AutoBeatApp:
         self.message = "試作候補を破棄し、以前の譜面を残しました。"
         self.set_screen("chart_summary")
 
+    def _practice_chart(self) -> Chart:
+        """開始位置より前のノーツを含めず、区間練習だけの判定対象を作る。"""
+        if self.chart is None:
+            raise RuntimeError("練習する譜面がありません。")
+        notes: list[Note] = []
+        for note in self.chart.notes:
+            if note.time < self.practice_start - 0.001 or note.time > self.practice_end + 0.001:
+                continue
+            if note.end_time is not None and note.end_time > self.practice_end + 0.001:
+                # 区間末尾をまたぐ長押しは練習範囲に収め、離すタイミングを明確にする。
+                notes.append(Note(note.time, note.lane, note.kind, self.practice_end, note.source, note.strength))
+            else:
+                notes.append(Note(note.time, note.lane, note.kind, note.end_time, note.source, note.strength))
+        return Chart(
+            version=self.chart.version,
+            music_hash=self.chart.music_hash,
+            difficulty=self.chart.difficulty,
+            seed=self.chart.seed,
+            song_duration=self.practice_end,
+            notes=notes,
+            generator_version=self.chart.generator_version,
+            metadata={**self.chart.metadata, "practice_start": self.practice_start, "practice_end": self.practice_end},
+        )
+
+    def open_practice_setup(self) -> None:
+        if not self.analysis or not self.chart:
+            self.error = "練習する解析結果または譜面がありません。"
+            self.set_screen("select")
+            return
+        self.practice_start = 0.0
+        self.practice_end = min(float(self.analysis.duration), PRACTICE_DEFAULT_DURATION)
+        self.practice_loop = True
+        self.practice_round = 0
+        self.practice_best_accuracy = 0.0
+        self.set_screen("practice_setup")
+
+    def adjust_practice_boundary(self, target: str, delta: float) -> None:
+        if not self.analysis:
+            return
+        duration = float(self.analysis.duration)
+        if target == "start":
+            self.practice_start = max(0.0, min(self.practice_start + delta, self.practice_end - PRACTICE_MIN_DURATION))
+        else:
+            self.practice_end = min(duration, max(self.practice_start + PRACTICE_MIN_DURATION, self.practice_end + delta))
+        self.message = f"練習区間: {self.practice_start:.1f} - {self.practice_end:.1f} sec"
+
+    def start_practice(self, *, countdown: bool = True) -> None:
+        if not self.chart or not self.analysis or not self.song_path:
+            return
+        if not self.audio_available:
+            self.error = "音声デバイスを初期化できないため、練習を開始できません。"
+            self.set_screen("practice_setup")
+            return
+        try:
+            practice_chart = self._practice_chart()
+            if not practice_chart.notes:
+                self.error = "この区間にはノーツがありません。区間を広げてください。"
+                self.set_screen("practice_setup")
+                return
+            self.audio.load(self.song_path, self.analysis.duration, float(self.settings["music_volume"]))
+            windows = JudgmentWindows.from_ms(self.settings["judgment_windows_ms"])
+            self.session = GameSession(practice_chart, windows, timing_offset=float(self.settings.get("timing_offset_ms", 0)) / 1000.0)
+            self.practice_active = True
+            self.tutorial_step_index = None
+            self.combo_banner = ""
+            self.hit_effects = []
+            self.judgment_feedback = None
+            self.start_banner_until = 0.0
+            self.error = ""
+            self.screen = "game"
+            if countdown:
+                self.countdown_started_at = time.perf_counter()
+            else:
+                self.countdown_started_at = None
+                self.audio.play(self.practice_start)
+                self.start_banner_until = time.perf_counter() + 0.30
+        except AudioClockError as error:
+            self.error = str(error)
+            self.set_screen("practice_setup")
+
     def start_game(self) -> None:
         if not self.chart or not self.analysis or not self.song_path:
             return
+        self.practice_active = False
         self.tutorial_step_index = None
         self.tutorial_started_at = None
         self.tutorial_paused_at = None
@@ -922,6 +1145,10 @@ class AutoBeatApp:
     def finish_game(self) -> None:
         if not self.session or not self.chart:
             return
+        if self.practice_active:
+            self.practice_best_accuracy = max(self.practice_best_accuracy, self.session.result().accuracy)
+            self.set_screen("practice_result")
+            return
         if self.tutorial_active:
             self.finish_tutorial_step()
             return
@@ -948,11 +1175,23 @@ class AutoBeatApp:
             self.audio.pause()
 
     def retry_game(self) -> None:
+        if self.practice_active:
+            self.audio.stop()
+            self.start_practice()
+            return
         if self.tutorial_active and self.tutorial_step_index is not None:
             self.start_tutorial_step(self.tutorial_step_index)
             return
         self.audio.stop()
         self.start_game()
+
+    def return_to_practice_setup(self) -> None:
+        """練習中断時は通常選曲へ流さず、設定済みの区間調整画面へ戻る。"""
+        self.audio.stop()
+        self.countdown_started_at = None
+        self.session = None
+        self.practice_active = False
+        self.set_screen("practice_setup")
 
     def return_to_song_select(self) -> None:
         if self.tutorial_active:
@@ -966,6 +1205,7 @@ class AutoBeatApp:
         self.audio.stop()
         self.countdown_started_at = None
         self.session = None
+        self.practice_active = False
         self.set_screen("select")
 
     def open_reward(self, reward: RewardImage) -> None:
@@ -1037,13 +1277,14 @@ class AutoBeatApp:
 
     def draw_title(self) -> None:
         width, height = self.size
-        self.text("AUTO BEAT 5", "title", CYAN, center=(width // 2, height // 2 - 165))
-        self.text("あなたの音楽を、あなたの譜面へ。", "body", MUTED, center=(width // 2, height // 2 - 110))
-        self.button("PLAY", pygame.Rect(width // 2 - 160, height // 2 - 55, 320, 50), lambda: self.set_screen("select"))
-        self.button("TUTORIAL", pygame.Rect(width // 2 - 160, height // 2 + 7, 320, 46), lambda: self.set_screen("tutorial"), accent=GREEN)
-        self.button("GALLERY", pygame.Rect(width // 2 - 160, height // 2 + 65, 320, 46), lambda: self.set_screen("gallery"), accent=MAGENTA)
-        self.button("SETTINGS", pygame.Rect(width // 2 - 160, height // 2 + 123, 320, 46), lambda: self.set_screen("settings"), accent=YELLOW)
-        self.text("MP3 / WAV / OGG / FLAC ・ 5 lanes ・ offline", "small", MUTED, center=(width // 2, height - 42))
+        self.text("AUTO BEAT 5", "title", CYAN, center=(width // 2, height // 2 - 185))
+        self.text("あなたの音楽を、あなたの譜面へ。", "body", MUTED, center=(width // 2, height // 2 - 130))
+        self.button("PLAY MUSIC", pygame.Rect(width // 2 - 190, height // 2 - 72, 380, 50), lambda: self.open_playlist("normal"))
+        self.button("PRACTICE", pygame.Rect(width // 2 - 190, height // 2 - 10, 380, 46), lambda: self.open_playlist("practice"), accent=GREEN)
+        self.button("TUTORIAL", pygame.Rect(width // 2 - 190, height // 2 + 48, 380, 42), lambda: self.set_screen("tutorial"), accent=CYAN)
+        self.button("GALLERY", pygame.Rect(width // 2 - 190, height // 2 + 102, 185, 42), lambda: self.set_screen("gallery"), accent=MAGENTA)
+        self.button("SETTINGS", pygame.Rect(width // 2 + 5, height // 2 + 102, 185, 42), lambda: self.set_screen("settings"), accent=YELLOW)
+        self.text("PLAY MUSIC: 通常プレイ  ・  PRACTICE: 苦手な区間を繰り返し練習", "small", MUTED, center=(width // 2, height - 42))
 
     def _song_best_text(self, music_hash: str) -> str:
         """選曲リスト用に、難易度別の自己ベストを横並びの短い表記へ整える。"""
@@ -1058,38 +1299,48 @@ class AutoBeatApp:
         return "  |  ".join(labels)
 
     def draw_select(self) -> None:
+        """通常・練習モードで共有する、デモ曲とユーザー曲の統合プレイリスト。"""
         width, height = self.size
-        self.heading("楽曲選択", "ユーザーが利用権限を持つ音楽ファイル、または同梱デモ曲を選択してください")
-        selected = str(self.song_path) if self.song_path else "まだ選択されていません"
-        self.panel(pygame.Rect(100, 145, width - 200, 112))
-        self.text("選択中の楽曲", "small", MUTED, pos=(130, 162))
-        self.text(Path(selected).name if self.song_path else selected, "h1" if self.song_path else "body", pos=(130, 190))
-        if self.song_path:
-            self.text(str(self.song_path), "small", MUTED, pos=(130, 228))
-        self.button("音楽ファイルを選択", pygame.Rect(width // 2 - 190, 270, 380, 42), self.choose_file)
-
-        y = 342
-        demos = self.demo_song_files()[:3]
-        if demos:
-            self.text("DEMO SONGS", "body", GREEN, pos=(125, y))
-            y += 31
-            for demo in demos:
-                rect = pygame.Rect(120, y, width - 240, 48)
-                self.panel(rect, (27, 54, 61), 7)
-                self.text(demo.name, "body", WHITE, pos=(rect.left + 16, rect.top + 13))
-                self.text("同梱デモ曲", "small", GREEN, pos=(rect.right - 112, rect.top + 16))
-                self.buttons.append((rect, lambda selected_demo=demo: self.load_demo_song(selected_demo)))
-                y += 56
-
-        recent = self.library_entries()
-        if recent:
-            self.text("RECENT LIBRARY", "body", YELLOW, pos=(125, y))
-            y += 31
-            self.button(f"ライブラリーを開く  {len(recent)} 曲  [L]", pygame.Rect(120, y, width - 240, 48), self.open_library, accent=YELLOW)
-        elif not demos:
-            self.text("解析した楽曲は、ここから再選択できます。", "small", MUTED, center=(width // 2, 410))
-            self.text("demo_songs フォルダへ制作者のデモ曲を追加できます。", "small", GREEN, center=(width // 2, 440))
-        self.button("戻る", pygame.Rect(50, height - 72, 140, 40), lambda: self.set_screen("title"), accent=MUTED)
+        entries = self.playlist_entries()
+        self._clamp_playlist_position()
+        mode_label = "PRACTICE" if self.launch_mode == "practice" else "NORMAL PLAY"
+        mode_color = GREEN if self.launch_mode == "practice" else CYAN
+        self.heading("PLAYLIST", f"{mode_label}  ・  デモ曲と解析済みの楽曲をまとめて選択  ・  ↑↓ / ホイール / PageUp・PageDown")
+        self.button("音楽を追加  [I]", pygame.Rect(width - 240, 124, 190, 36), self.choose_file, accent=YELLOW)
+        list_rect = pygame.Rect(95, 172, width - 190, PLAYLIST_VISIBLE_ROWS * PLAYLIST_ROW_HEIGHT + 16)
+        self.panel(list_rect)
+        if not entries:
+            self.text("楽曲がありません。音楽を追加して解析するか、demo_songs フォルダへデモ曲を入れてください。", "body", MUTED, center=list_rect.center)
+        else:
+            start = self.playlist_scroll_index
+            end = min(len(entries), start + PLAYLIST_VISIBLE_ROWS)
+            for index in range(start, end):
+                entry = entries[index]
+                row = pygame.Rect(list_rect.left + 14, list_rect.top + 8 + (index - start) * PLAYLIST_ROW_HEIGHT, list_rect.width - 48, PLAYLIST_ROW_HEIGHT - 7)
+                selected = index == self.playlist_selected_index
+                self.panel(row, PANEL if selected else PANEL_DARK, 7)
+                if selected:
+                    pygame.draw.rect(self.surface, mode_color, pygame.Rect(row.left, row.top + 6, 4, row.height - 12), border_radius=2)
+                name_color = WHITE if entry.exists else MUTED
+                self.text(f"{index + 1:02d}. {entry.path.name or '不明な楽曲'}", "body", name_color, pos=(row.left + 16, row.top + 8))
+                self.text(f"{entry.bpm:.1f} BPM   {entry.duration:.1f} sec", "small", MUTED, pos=(row.left + 16, row.top + 34))
+                tag_color = GREEN if entry.source == "demo" else (YELLOW if entry.source == "library" else CYAN)
+                self.text(entry.source_label, "small", tag_color, pos=(row.right - 230, row.top + 10))
+                best_color = CYAN if song_ranking_summary(self.profile, entry.music_hash) else MUTED
+                self.text(f"BEST  {self._song_best_text(entry.music_hash)}", "small", best_color, pos=(row.right - 510, row.top + 34))
+                if not entry.exists:
+                    self.text("MISSING", "small", RED, pos=(row.right - 95, row.top + 34))
+                self.buttons.append((row, lambda selected_index=index: self.select_playlist_entry(selected_index)))
+            if len(entries) > PLAYLIST_VISIBLE_ROWS:
+                track = pygame.Rect(list_rect.right - 20, list_rect.top + 10, 7, list_rect.height - 20)
+                pygame.draw.rect(self.surface, PANEL_DARK, track, border_radius=3)
+                thumb_height = max(28, int(track.height * PLAYLIST_VISIBLE_ROWS / len(entries)))
+                max_scroll = len(entries) - PLAYLIST_VISIBLE_ROWS
+                progress = self.playlist_scroll_index / max_scroll if max_scroll else 0.0
+                thumb_top = track.top + int((track.height - thumb_height) * progress)
+                pygame.draw.rect(self.surface, mode_color, pygame.Rect(track.left, thumb_top, track.width, thumb_height), border_radius=3)
+        self.text(f"{self.playlist_scroll_index + 1 if entries else 0}-{min(len(entries), self.playlist_scroll_index + PLAYLIST_VISIBLE_ROWS)} / {len(entries)}", "small", MUTED, center=(width // 2, height - 112))
+        self.button("タイトルへ  [ESC]", pygame.Rect(50, height - 72, 180, 40), lambda: self.set_screen("title"), accent=MUTED)
 
     def draw_library(self) -> None:
         width, height = self.size
@@ -1213,8 +1464,50 @@ class AutoBeatApp:
             self.text(difficulty.label, "body", CYAN if selected else WHITE, pos=(rect.left + 24, rect.top + 17))
             self.text(descriptions[index], "small", MUTED, pos=(rect.left + 205, rect.top + 21))
             self.buttons.append((rect, lambda i=index: setattr(self, "selected_difficulty", i)))
-        self.button("この難易度でプレイ", pygame.Rect(width // 2 - 190, height - 100, 380, 48), lambda: self.select_chart(difficulties[self.selected_difficulty]), accent=GREEN)
+        self.button("この難易度で練習" if self.launch_mode == "practice" else "この難易度でプレイ", pygame.Rect(width // 2 - 190, height - 100, 380, 48), lambda: self.select_chart(difficulties[self.selected_difficulty]), accent=GREEN)
         self.button("楽曲選択へ", pygame.Rect(50, height - 72, 150, 40), lambda: self.set_screen("select"), accent=MUTED)
+
+    def draw_practice_setup(self) -> None:
+        if not self.analysis or not self.chart:
+            self.set_screen("select")
+            return
+        width, height = self.size
+        duration = float(self.analysis.duration)
+        self.heading("PRACTICE SETUP", f"{Path(self.song_path).name if self.song_path else ''}  ・  {self.chart.difficulty.label}  ・  スコア・報酬へは反映されません")
+        panel = pygame.Rect(width // 2 - 420, 160, 840, 300)
+        self.panel(panel)
+        self.text("練習する区間", "body", GREEN, pos=(panel.left + 32, panel.top + 28))
+        self.text(f"{self.practice_start:.1f} sec  →  {self.practice_end:.1f} sec", "title", WHITE, center=(width // 2, panel.top + 95))
+        timeline = pygame.Rect(panel.left + 40, panel.top + 145, panel.width - 80, 14)
+        pygame.draw.rect(self.surface, (49, 65, 94), timeline, border_radius=7)
+        start_x = timeline.left + int(timeline.width * self.practice_start / max(0.1, duration))
+        end_x = timeline.left + int(timeline.width * self.practice_end / max(0.1, duration))
+        pygame.draw.rect(self.surface, GREEN, pygame.Rect(start_x, timeline.top, max(8, end_x - start_x), timeline.height), border_radius=7)
+        pygame.draw.circle(self.surface, WHITE, (start_x, timeline.centery), 10)
+        pygame.draw.circle(self.surface, WHITE, (end_x, timeline.centery), 10)
+        self.text(f"曲全体: {duration:.1f} sec", "small", MUTED, pos=(panel.left + 40, panel.top + 172))
+        self.text("開始位置  ← / →  0.1秒   Shift+← / →  1秒", "small", MUTED, pos=(panel.left + 40, panel.top + 207))
+        self.text("終了位置  A / D  0.1秒   Shift+A / D  1秒", "small", MUTED, pos=(panel.left + 40, panel.top + 232))
+        self.text("ループ", "small", MUTED, pos=(panel.left + 40, panel.top + 262))
+        self.button("ON" if self.practice_loop else "OFF", pygame.Rect(panel.left + 125, panel.top + 252, 90, 30), lambda: setattr(self, "practice_loop", not self.practice_loop), accent=GREEN if self.practice_loop else MUTED)
+        self.button("練習を始める  [ENTER]", pygame.Rect(width // 2 - 220, height - 125, 440, 50), self.start_practice, accent=GREEN)
+        self.button("プレイリストへ  [ESC]", pygame.Rect(50, height - 72, 200, 40), lambda: self.set_screen("select"), accent=MUTED)
+
+    def draw_practice_result(self) -> None:
+        if not self.session:
+            self.set_screen("practice_setup")
+            return
+        width, height = self.size
+        result = self.session.result()
+        self.heading("PRACTICE SUMMARY", f"{self.practice_start:.1f} - {self.practice_end:.1f} sec  ・  練習記録は通常ランキング・報酬へ反映されません")
+        self.panel(pygame.Rect(width // 2 - 340, 150, 680, 285))
+        self.text(f"ACCURACY  {result.accuracy:.2f}%", "title", GREEN, center=(width // 2, 230))
+        self.text(f"BEST IN THIS SESSION  {self.practice_best_accuracy:.2f}%", "body", CYAN, center=(width // 2, 285))
+        self.text(f"PERFECT {result.judgments['PERFECT']}   GREAT {result.judgments['GREAT']}   GOOD {result.judgments['GOOD']}   MISS {result.judgments['MISS']}", "body", MUTED, center=(width // 2, 340))
+        self.text(f"LOOPS  {self.practice_round + 1}", "small", YELLOW, center=(width // 2, 385))
+        self.button("同じ区間をもう一度  [R]", pygame.Rect(width // 2 - 300, height - 130, 285, 46), self.start_practice, accent=GREEN)
+        self.button("区間を調整", pygame.Rect(width // 2 + 15, height - 130, 285, 46), lambda: self.set_screen("practice_setup"), accent=CYAN)
+        self.button("タイトルへ", pygame.Rect(width // 2 - 150, height - 72, 300, 40), lambda: self.set_screen("title"), accent=MUTED)
 
     def draw_chart_summary(self) -> None:
         if not self.analysis or not self.chart:
@@ -1339,8 +1632,13 @@ class AutoBeatApp:
         self._draw_hit_effects(left, lane_width, line_y)
         self.text(f"SCORE  {self.session.score:07d}", "mono", pos=(45, 45))
         self.text(f"COMBO  {self.session.combo}", "mono", YELLOW, pos=(45, 75))
-        self.text(f"{now:.1f} / {self.chart.song_duration:.1f}", "mono", MUTED, pos=(width - 190, 45))
-        self.text("TUTORIAL" if self.tutorial_active else self.chart.difficulty.label, "mono", GREEN if self.tutorial_active else CYAN, pos=(width - 150, 75))
+        if self.practice_active:
+            self.text(f"{now:.1f} / {self.practice_end:.1f}  ({self.practice_start:.1f}-{self.practice_end:.1f})", "mono", MUTED, pos=(width - 300, 45))
+            self.text(f"PRACTICE  {'LOOP ON' if self.practice_loop else 'LOOP OFF'}  #{self.practice_round + 1}", "mono", GREEN, pos=(width - 330, 75))
+            self.text("練習記録はスコア・報酬・ランキングへ反映されません  [L] ループ切替  [Q] 区間設定へ", "small", MUTED, center=(width // 2, 34))
+        else:
+            self.text(f"{now:.1f} / {self.chart.song_duration:.1f}", "mono", MUTED, pos=(width - 190, 45))
+            self.text("TUTORIAL" if self.tutorial_active else self.chart.difficulty.label, "mono", GREEN if self.tutorial_active else CYAN, pos=(width - 150, 75))
         if self.tutorial_active:
             self.text(str(self.chart.metadata.get("tutorial_instruction", "")), "small", GREEN, center=(width // 2, 34))
         if self.playfield_mode_key == "tall":
@@ -1361,7 +1659,7 @@ class AutoBeatApp:
             self.text("PAUSED", "h1", YELLOW, center=(width // 2, height // 2 - 90))
             self.button("再開  [ESC]", pygame.Rect(width // 2 - 160, height // 2 - 48, 320, 42), self.toggle_pause, accent=GREEN)
             self.button("リトライ  [R]", pygame.Rect(width // 2 - 160, height // 2 + 6, 320, 42), self.retry_game, accent=CYAN)
-            self.button("チュートリアルへ  [Q]" if self.tutorial_active else "楽曲選択へ  [Q]", pygame.Rect(width // 2 - 160, height // 2 + 60, 320, 42), self.return_to_song_select, accent=MUTED)
+            self.button("チュートリアルへ  [Q]" if self.tutorial_active else ("区間設定へ  [Q]" if self.practice_active else "楽曲選択へ  [Q]"), pygame.Rect(width // 2 - 160, height // 2 + 60, 320, 42), self.return_to_song_select, accent=MUTED)
 
     def draw_result(self) -> None:
         if not self.session:
@@ -1696,6 +1994,8 @@ class AutoBeatApp:
             "analyzing": self.draw_analyzing,
             "difficulty": self.draw_difficulty,
             "chart_summary": self.draw_chart_summary,
+            "practice_setup": self.draw_practice_setup,
+            "practice_result": self.draw_practice_result,
             "ranking": self.draw_ranking,
             "game": self.draw_game,
             "result": self.draw_result,
@@ -1722,7 +2022,9 @@ class AutoBeatApp:
             return
         if self.screen == "title":
             if event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                self.set_screen("select")
+                self.open_playlist("normal")
+            elif event.key == pygame.K_p:
+                self.open_playlist("practice")
             elif event.key == pygame.K_t:
                 self.set_screen("tutorial")
             elif event.key == pygame.K_g:
@@ -1730,8 +2032,24 @@ class AutoBeatApp:
             elif event.key == pygame.K_s:
                 self.set_screen("settings")
         elif self.screen == "select":
-            if event.key == pygame.K_l:
-                self.open_library()
+            if event.key == pygame.K_UP:
+                self.move_playlist_selection(-1)
+            elif event.key == pygame.K_DOWN:
+                self.move_playlist_selection(1)
+            elif event.key == pygame.K_PAGEUP:
+                self.move_playlist_selection(-PLAYLIST_VISIBLE_ROWS)
+            elif event.key == pygame.K_PAGEDOWN:
+                self.move_playlist_selection(PLAYLIST_VISIBLE_ROWS)
+            elif event.key == pygame.K_HOME:
+                self.playlist_selected_index = 0
+                self._clamp_playlist_position()
+            elif event.key == pygame.K_END:
+                self.playlist_selected_index = max(0, len(self.playlist_entries()) - 1)
+                self._clamp_playlist_position()
+            elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                self.select_current_playlist_entry()
+            elif event.key == pygame.K_i:
+                self.choose_file()
             elif event.key == pygame.K_ESCAPE:
                 self.set_screen("title")
         elif self.screen == "library":
@@ -1777,6 +2095,29 @@ class AutoBeatApp:
                 self.select_chart(list(Difficulty)[self.selected_difficulty])
             elif event.key == pygame.K_ESCAPE:
                 self.set_screen("select")
+        elif self.screen == "practice_setup":
+            step = 1.0 if event.mod & pygame.KMOD_SHIFT else 0.1
+            if event.key == pygame.K_LEFT:
+                self.adjust_practice_boundary("start", -step)
+            elif event.key == pygame.K_RIGHT:
+                self.adjust_practice_boundary("start", step)
+            elif event.key == pygame.K_a:
+                self.adjust_practice_boundary("end", -step)
+            elif event.key == pygame.K_d:
+                self.adjust_practice_boundary("end", step)
+            elif event.key == pygame.K_l:
+                self.practice_loop = not self.practice_loop
+            elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                self.start_practice()
+            elif event.key == pygame.K_ESCAPE:
+                self.set_screen("select")
+        elif self.screen == "practice_result":
+            if event.key == pygame.K_r:
+                self.start_practice()
+            elif event.key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_e):
+                self.set_screen("practice_setup")
+            elif event.key == pygame.K_ESCAPE:
+                self.set_screen("title")
         elif self.screen == "chart_summary":
             if event.key in (pygame.K_RETURN, pygame.K_SPACE):
                 self.start_game()
@@ -1862,7 +2203,7 @@ class AutoBeatApp:
         elif self.screen == "game":
             if self.countdown_active:
                 if event.key == pygame.K_ESCAPE:
-                    self.return_to_song_select()
+                    self.return_to_practice_setup() if self.practice_active else self.return_to_song_select()
                 return
             if self.game_paused:
                 if event.key == pygame.K_ESCAPE:
@@ -1870,10 +2211,17 @@ class AutoBeatApp:
                 elif event.key == pygame.K_r:
                     self.retry_game()
                 elif event.key == pygame.K_q:
-                    self.return_to_song_select()
+                    self.return_to_practice_setup() if self.practice_active else self.return_to_song_select()
             elif event.key == pygame.K_ESCAPE:
                 self.toggle_pause()
             else:
+                if self.practice_active and event.key == pygame.K_l:
+                    self.practice_loop = not self.practice_loop
+                    self.message = f"ループを{'ON' if self.practice_loop else 'OFF'}にしました。"
+                    return
+                if self.practice_active and event.key == pygame.K_q:
+                    self.return_to_practice_setup()
+                    return
                 try:
                     lane = self.settings["keys"].index(key)
                 except ValueError:
@@ -1902,7 +2250,7 @@ class AutoBeatApp:
                 self._start_after_countdown()
             except AudioClockError as error:
                 self.error = str(error)
-                self.screen = "tutorial" if self.tutorial_active else "difficulty"
+                self.screen = "tutorial" if self.tutorial_active else ("practice_setup" if self.practice_active else "difficulty")
             return
         if self.game_paused:
             return
@@ -1913,6 +2261,14 @@ class AutoBeatApp:
             self._play_feedback(judgment)
         if self.tutorial_active:
             if current_time >= self.chart.song_duration:
+                self.finish_game()
+            return
+        if self.practice_active and current_time >= self.practice_end - 0.01:
+            self.audio.stop()
+            if self.practice_loop:
+                self.practice_round += 1
+                self.start_practice(countdown=False)
+            else:
                 self.finish_game()
             return
         # 最後のノーツが判定済みでも、曲末の余韻・無音区間・アウトロは再生し切る。
@@ -1927,6 +2283,8 @@ class AutoBeatApp:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
+                elif event.type == pygame.MOUSEWHEEL and self.screen == "select":
+                    self.scroll_playlist(-event.y)
                 elif event.type == pygame.MOUSEWHEEL and self.screen == "library":
                     self.scroll_library(-event.y)
                 elif event.type == pygame.MOUSEWHEEL and self.screen == "reward_manager":

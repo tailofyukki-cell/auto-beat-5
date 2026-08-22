@@ -1,7 +1,9 @@
 """Pygame音源再生と単調時計を接続する同期時計。"""
 from __future__ import annotations
 
+import tempfile
 import time
+import wave
 from pathlib import Path
 
 
@@ -18,19 +20,43 @@ class AudioClock:
         self._paused_at: float | None = None
         self._paused_total = 0.0
         self._duration = 0.0
+        self._volume = 0.8
+        self._segment_path: Path | None = None
         self._loaded = False
         self._last_time = 0.0
         self._last_mixer_time = -1.0
 
-    def load(self, path: str | Path, duration: float, volume: float) -> None:
+    def _cleanup_segment(self) -> None:
+        """区間練習用の一時WAVを残さない。失敗しても次の再生を妨げない。"""
+        if self._segment_path is None:
+            return
+        try:
+            self._segment_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._segment_path = None
+
+    def _unload_music(self) -> None:
         import pygame
 
         try:
-            pygame.mixer.music.load(str(Path(path).resolve()))
-            pygame.mixer.music.set_volume(max(0.0, min(1.0, volume)))
+            pygame.mixer.music.unload()
+        except (AttributeError, pygame.error):
+            pass
+
+    def load(self, path: str | Path, duration: float, volume: float) -> None:
+        import pygame
+
+        self._unload_music()
+        self._cleanup_segment()
+        source = Path(path)
+        try:
+            pygame.mixer.music.load(str(source.resolve()))
+            self._volume = max(0.0, min(1.0, volume))
+            pygame.mixer.music.set_volume(self._volume)
         except pygame.error as error:
             raise AudioClockError("音源を再生できません。対応形式または音声デバイスを確認してください。") from error
-        self.path = Path(path)
+        self.path = source
         self._duration = max(0.0, duration)
         self._started_at = None
         self._paused_at = None
@@ -39,16 +65,61 @@ class AudioClock:
         self._last_mixer_time = -1.0
         self._loaded = True
 
-    def play(self) -> None:
+    def _play_wav_segment(self, offset: float) -> None:
+        """PCM WAVを標準ライブラリで切り出し、WAVでも任意位置から再生する。"""
+        import pygame
+
+        if self.path is None:
+            raise AudioClockError("再生するWAVファイルが見つかりません。")
+        segment: Path | None = None
+        try:
+            with wave.open(str(self.path.resolve()), "rb") as reader:
+                total_frames = reader.getnframes()
+                start_frame = min(total_frames, max(0, int(offset * reader.getframerate())))
+                reader.setpos(start_frame)
+                parameters = reader.getparams()
+                remaining = reader.readframes(total_frames - start_frame)
+            handle = tempfile.NamedTemporaryFile(prefix="autobeat5_practice_", suffix=".wav", delete=False)
+            segment = Path(handle.name)
+            handle.close()
+            with wave.open(str(segment), "wb") as writer:
+                writer.setparams(parameters)
+                writer.writeframes(remaining)
+            self._cleanup_segment()
+            self._segment_path = segment
+            pygame.mixer.music.load(str(segment))
+            pygame.mixer.music.set_volume(self._volume)
+            pygame.mixer.music.play()
+        except (OSError, wave.Error, pygame.error) as error:
+            if segment is not None:
+                try:
+                    segment.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._cleanup_segment()
+            raise AudioClockError("このWAVは区間開始位置の再生に対応していません。PCM WAV または MP3 / OGG をお試しください。") from error
+
+    def play(self, start_at: float = 0.0) -> None:
+        """指定した曲内時刻から再生し、判定時計も同じ絶対時刻へ合わせる。"""
         import pygame
 
         if not self._loaded:
             raise AudioClockError("再生する音源が読み込まれていません。")
-        pygame.mixer.music.play()
-        self._started_at = time.perf_counter()
+        offset = max(0.0, min(float(start_at), self._duration))
+        if offset > 0.001 and self.path is not None and self.path.suffix.lower() == ".wav":
+            self._play_wav_segment(offset)
+        else:
+            try:
+                # pygame 2系ではMP3 / OGG等に開始位置を渡せる。
+                pygame.mixer.music.play(start=offset)
+            except (TypeError, pygame.error) as error:
+                if offset > 0.001:
+                    raise AudioClockError("この音源形式は区間練習の開始位置指定に対応していません。MP3 / OGG または PCM WAV をお試しください。") from error
+                pygame.mixer.music.play()
+        self._started_at = time.perf_counter() - offset
         self._paused_at = None
         self._paused_total = 0.0
-        self._last_time = 0.0
+        self._last_time = offset
         self._last_mixer_time = -1.0
 
     def pause(self) -> None:
@@ -72,13 +143,16 @@ class AudioClock:
         import pygame
 
         pygame.mixer.music.stop()
+        self._unload_music()
+        self._cleanup_segment()
         self._started_at = None
         self._paused_at = None
 
     def set_volume(self, volume: float) -> None:
         import pygame
 
-        pygame.mixer.music.set_volume(max(0.0, min(1.0, volume)))
+        self._volume = max(0.0, min(1.0, volume))
+        pygame.mixer.music.set_volume(self._volume)
 
     def _monotonic_time(self) -> float:
         if self._started_at is None:

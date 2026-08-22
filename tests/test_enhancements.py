@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from chart_generator import ChartGenerator
 from gameplay import GameSession, JudgmentWindows
 from models import AnalysisResult, Chart, Difficulty, Judgment, Note, NoteType
-from persistence import AppPaths, load_profile, record_recent_song
+from persistence import RECENT_SONG_LIMIT, AppPaths, load_profile, record_recent_song
 
 
 class EnhancementTest(unittest.TestCase):
@@ -59,6 +59,22 @@ class EnhancementTest(unittest.TestCase):
         self.assertEqual(len(restored["recent_songs"]), 1)
         self.assertEqual(restored["recent_songs"][0]["music_hash"], "b" * 64)
         self.assertEqual(restored["recent_songs"][0]["source_path"], "example.wav")
+
+    def test_recent_song_library_retains_one_hundred_entries_for_scrollable_playlist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = AppPaths(root, root / "settings.json", root / "profile.json", root / "cache", root / "charts", root / "rewards")
+            paths.ensure()
+            profile = load_profile(paths)
+            for index in range(RECENT_SONG_LIMIT + 5):
+                analysis = self.analysis()
+                analysis.music_hash = f"{index:064x}"
+                analysis.source_path = f"C:/Music/song_{index:03d}.wav"
+                record_recent_song(paths, profile, analysis)
+            restored = load_profile(paths)
+        self.assertEqual(len(restored["recent_songs"]), RECENT_SONG_LIMIT)
+        self.assertEqual(restored["recent_songs"][0]["source_path"], "C:/Music/song_104.wav")
+        self.assertNotIn("audio_data", restored["recent_songs"][0])
 
 
 if __name__ == "__main__":

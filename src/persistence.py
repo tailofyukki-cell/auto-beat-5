@@ -208,8 +208,11 @@ def save_chart(paths: AppPaths, chart: Chart) -> None:
     _atomic_write_json(chart_path(paths, chart.music_hash, chart.difficulty.value), chart.to_dict())
 
 
+RECENT_SONG_LIMIT = 100
+
+
 def record_recent_song(paths: AppPaths, profile: dict[str, Any], analysis: AnalysisResult) -> None:
-    """解析済み楽曲を最大20件のローカルライブラリーとして保持する。音源本体は保存しない。"""
+    """解析済み楽曲を最大100件のローカルライブラリーとして保持する。音源本体は保存しない。"""
     entry = {
         "music_hash": analysis.music_hash,
         "source_path": analysis.source_path,
@@ -222,7 +225,7 @@ def record_recent_song(paths: AppPaths, profile: dict[str, Any], analysis: Analy
         for item in profile.get("recent_songs", [])
         if item.get("music_hash") != analysis.music_hash and item.get("source_path") != analysis.source_path
     ]
-    profile["recent_songs"] = [entry, *existing][:20]
+    profile["recent_songs"] = [entry, *existing][:RECENT_SONG_LIMIT]
     save_profile(paths, profile)
 
 
