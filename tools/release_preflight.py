@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +20,7 @@ REQUIRED_ENTRIES = (
     "AutoBeat5/AutoBeat5.exe",
     "AutoBeat5/TRIAL_README.txt",
     "AutoBeat5/RC1_TEST_CHECKLIST.md",
+    "AutoBeat5/RELEASE_CHANNEL.txt",
     "AutoBeat5/demo_songs/demo_manifest.json",
     "AutoBeat5/rewards/reward_config.json",
     "AutoBeat5/licenses/INDEX.md",
@@ -44,6 +47,58 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def assert_demo_bundle_is_allowlisted(app_dir: Path) -> None:
+    """Reject personal music or local-player state from a sales release."""
+    for forbidden_name in ("profile.json", "settings.json", "library.json", "recent_songs.json", "cache", "charts"):
+        if (app_dir / forbidden_name).exists():
+            raise RuntimeError(f"Personal player data is present in release root: {forbidden_name}")
+
+    marker = app_dir / "RELEASE_CHANNEL.txt"
+    if marker.read_text(encoding="utf-8").strip() != "AutoBeat5_Release_RC1":
+        raise RuntimeError("Release data namespace marker is missing or invalid")
+
+    demo_root = app_dir / "demo_songs"
+    try:
+        manifest = json.loads((demo_root / "demo_manifest.json").read_text(encoding="utf-8"))
+        songs = manifest["songs"]
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Release demo manifest is missing or invalid") from exc
+    if not isinstance(songs, list) or not songs:
+        raise RuntimeError("Release demo manifest has no songs")
+
+    allowed_audio: set[str] = set()
+    allowed_hashes: set[str] = set()
+    for song in songs:
+        if not isinstance(song, dict):
+            raise RuntimeError("Release demo manifest contains an invalid song entry")
+        filename = song.get("file")
+        digest = song.get("music_hash")
+        if not isinstance(filename, str) or Path(filename).name != filename:
+            raise RuntimeError("Release demo manifest contains an unsafe audio filename")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise RuntimeError("Release demo manifest contains an invalid music hash")
+        if not (demo_root / filename).is_file():
+            raise RuntimeError(f"Manifest-authorized demo audio is missing: {filename}")
+        allowed_audio.add(filename)
+        allowed_hashes.add(digest)
+
+    allowed_files = {"demo_manifest.json", "README.txt", *allowed_audio}
+    for path in demo_root.iterdir():
+        if path.is_file() and path.name not in allowed_files:
+            raise RuntimeError(f"Unapproved file in demo bundle: {path.name}")
+        if path.is_dir() and path.name not in {"cache", "charts"}:
+            raise RuntimeError(f"Unapproved directory in demo bundle: {path.name}")
+
+    cache_root = demo_root / "cache"
+    chart_root = demo_root / "charts"
+    actual_cache = {path.stem for path in cache_root.glob("*.json")} if cache_root.is_dir() else set()
+    actual_charts = {path.name for path in chart_root.iterdir() if path.is_dir()} if chart_root.is_dir() else set()
+    if actual_cache != allowed_hashes:
+        raise RuntimeError("Release demo cache hashes do not exactly match the manifest")
+    if actual_charts != allowed_hashes:
+        raise RuntimeError("Release demo chart hashes do not exactly match the manifest")
 
 
 def assert_zip_contents(archive_path: Path) -> int:
@@ -99,7 +154,12 @@ def smoke_test_exe(app_dir: Path, work_dir: Path) -> None:
     environment = os.environ.copy()
     environment["SDL_VIDEODRIVER"] = "dummy"
     environment["SDL_AUDIODRIVER"] = "dummy"
-    environment["AUTOBEAT_DATA_DIR"] = str(work_dir / "appdata")
+    # Do not bypass AppPaths with AUTOBEAT_DATA_DIR here. A sales build must
+    # prove that it uses its own release channel rather than a developer's
+    # existing AutoBeat5 profile.
+    environment.pop("AUTOBEAT_DATA_DIR", None)
+    appdata_root = work_dir / "appdata"
+    environment["APPDATA"] = str(appdata_root)
     process = subprocess.Popen(
         [str(app_dir / "AutoBeat5.exe")],
         cwd=app_dir,
@@ -111,6 +171,11 @@ def smoke_test_exe(app_dir: Path, work_dir: Path) -> None:
     exit_code = process.poll()
     if exit_code is not None:
         raise RuntimeError(f"AutoBeat5.exe exited during smoke test: {exit_code}")
+    release_namespace = appdata_root / "AutoBeat5_Release_RC1"
+    if not release_namespace.is_dir():
+        raise RuntimeError("Sales release did not create its isolated AppData namespace")
+    if (appdata_root / "AutoBeat5").exists():
+        raise RuntimeError("Sales release accessed the development AppData namespace")
     process.terminate()
     try:
         process.wait(timeout=10)
@@ -134,6 +199,7 @@ def main() -> None:
         work_dir = Path(temporary)
         print("STEP 2/3: expanding with Windows Expand-Archive", flush=True)
         app_dir = expand_with_windows(archive_path, work_dir)
+        assert_demo_bundle_is_allowlisted(app_dir)
         if not arguments.skip_smoke:
             print("STEP 3/3: smoke-testing AutoBeat5.exe", flush=True)
             smoke_test_exe(app_dir, work_dir)

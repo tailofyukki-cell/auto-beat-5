@@ -15,6 +15,25 @@ from typing import Any
 from models import AnalysisResult, Chart, DEFAULT_KEYS
 
 APP_NAME = "AutoBeat5"
+RELEASE_CHANNEL_MARKER = "RELEASE_CHANNEL.txt"
+
+
+def data_namespace() -> str:
+    """Return an isolated AppData namespace for a packaged release channel.
+
+    Development builds continue to use ``AutoBeat5``. A packaged release carries
+    a short marker next to the executable, preventing it from reading a
+    developer's personal profile, library history, scores, or cached charts.
+    """
+    if not getattr(sys, "frozen", False):
+        return APP_NAME
+    marker = Path(sys.executable).resolve().parent / RELEASE_CHANNEL_MARKER
+    try:
+        channel = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return APP_NAME
+    safe_channel = "".join(character for character in channel if character.isascii() and (character.isalnum() or character in "_-"))
+    return safe_channel or APP_NAME
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,9 +51,9 @@ class AppPaths:
         if os.environ.get("AUTOBEAT_DATA_DIR"):
             root = Path(os.environ["AUTOBEAT_DATA_DIR"]).expanduser()
         elif os.name == "nt" and os.environ.get("APPDATA"):
-            root = Path(os.environ["APPDATA"]) / APP_NAME
+            root = Path(os.environ["APPDATA"]) / data_namespace()
         else:
-            root = Path.home() / f".{APP_NAME.lower()}"
+            root = Path.home() / f".{data_namespace().lower()}"
         # 配布版ではexe隣接の素材フォルダを優先する。開発時のご褒美画像は従来どおりアプリデータ配下に置く。
         if getattr(sys, "frozen", False):
             bundled_root = Path(sys.executable).resolve().parent

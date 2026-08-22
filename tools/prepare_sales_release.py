@@ -54,6 +54,63 @@ def copy_tree(source: Path, destination: Path) -> None:
     shutil.copytree(source, destination)
 
 
+def stage_demo_bundle(destination: Path) -> None:
+    """Copy only manifest-authorized demo audio and its matching generated data.
+
+    The source folder is a creator workspace and can contain temporary or
+    personal files. The sales staging folder must instead be built from a strict
+    allow list: the manifest's audio filenames and their 64-character hashes.
+    """
+    source = ROOT / "demo_songs"
+    manifest_path = source / "demo_manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        songs = manifest["songs"]
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid demo manifest: {manifest_path}") from exc
+    if not isinstance(songs, list) or not songs:
+        raise RuntimeError("Demo manifest must contain at least one song")
+
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(manifest_path, destination / manifest_path.name)
+    readme = source / "README.txt"
+    if readme.is_file():
+        shutil.copy2(readme, destination / readme.name)
+
+    allowed_hashes: set[str] = set()
+    for song in songs:
+        if not isinstance(song, dict):
+            raise RuntimeError("Demo manifest contains a non-object song entry")
+        filename = song.get("file")
+        digest = song.get("music_hash")
+        if not isinstance(filename, str) or Path(filename).name != filename:
+            raise RuntimeError(f"Demo manifest contains an invalid audio filename: {filename!r}")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise RuntimeError(f"Demo manifest contains an invalid music hash for {filename!r}")
+        audio = source / filename
+        if not audio.is_file():
+            raise RuntimeError(f"Manifest-authorized demo audio is missing: {audio}")
+        shutil.copy2(audio, destination / filename)
+        allowed_hashes.add(digest)
+
+    for digest in sorted(allowed_hashes):
+        cache = source / "cache" / f"{digest}.json"
+        charts = source / "charts" / digest
+        if not cache.is_file() or not charts.is_dir():
+            raise RuntimeError(f"Demo cache or charts are missing for manifest hash: {digest}")
+        target_cache = destination / "cache"
+        target_cache.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cache, target_cache / cache.name)
+        copy_tree(charts, destination / "charts" / digest)
+
+
+def stage_release_marker(stage_dir: Path) -> None:
+    # This marker isolates a shipped release from the developer's AppData profile.
+    (stage_dir / "RELEASE_CHANNEL.txt").write_text("AutoBeat5_Release_RC1\n", encoding="ascii")
+
+
 def license_candidates(distribution: metadata.Distribution) -> Iterable[Path]:
     seen: set[Path] = set()
     for entry in distribution.files or []:
@@ -217,11 +274,13 @@ def stage_assets(dist_dir: Path, stage_dir: Path) -> None:
     stage_dir.parent.mkdir(parents=True, exist_ok=True)
     copy_tree(dist_dir, stage_dir)
 
-    for folder in ("demo_songs", "rewards", "licenses"):
+    stage_demo_bundle(stage_dir / "demo_songs")
+    for folder in ("rewards", "licenses"):
         source = ROOT / folder
         if not source.is_dir():
             raise RuntimeError(f"Required release asset folder is missing: {source}")
         copy_tree(source, stage_dir / folder)
+    stage_release_marker(stage_dir)
 
     readme = ROOT / "TRIAL_README.txt"
     if not readme.is_file():
