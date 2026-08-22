@@ -275,7 +275,7 @@ def stage_assets(dist_dir: Path, stage_dir: Path) -> None:
     copy_tree(dist_dir, stage_dir)
 
     stage_demo_bundle(stage_dir / "demo_songs")
-    for folder in ("rewards", "licenses"):
+    for folder in ("rewards", "assets", "licenses"):
         source = ROOT / folder
         if not source.is_dir():
             raise RuntimeError(f"Required release asset folder is missing: {source}")

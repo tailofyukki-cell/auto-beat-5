@@ -16,7 +16,14 @@ if %errorlevel% neq 0 (
   pause
   exit /b 1
 )
+xcopy "assets" "release\_staging\AutoBeat5\assets\" /E /I /Y >nul
+if %errorlevel% neq 0 (
+  echo ERROR: Failed to copy assets folder.
+  pause
+  exit /b 1
+)
 xcopy "demo_songs" "release\_staging\AutoBeat5\demo_songs\" /E /I /Y >nul
+
 if %errorlevel% neq 0 (
   echo ERROR: Failed to copy demo_songs folder.
   pause

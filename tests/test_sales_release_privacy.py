@@ -82,6 +82,35 @@ class SalesReleasePrivacyTests(unittest.TestCase):
             self.assertNotIn(f"cache/{self.stray_digest}.json", copied)
             self.assertNotIn(f"charts/{self.stray_digest}/beginner.json", copied)
 
+    def test_staging_copies_mascot_assets_from_dedicated_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            self.create_demo_source(workspace)
+            (workspace / "rewards").mkdir()
+            (workspace / "licenses").mkdir()
+            (workspace / "assets" / "mascots").mkdir(parents=True)
+            (workspace / "assets" / "mascots" / "manifest.json").write_text(
+                json.dumps({"version": 1, "mascots": [{"id": "cute", "file": "cute.png"}]}) + "\n",
+                encoding="utf-8",
+            )
+            (workspace / "assets" / "mascots" / "cute.png").write_bytes(b"sprite")
+            (workspace / "TRIAL_README.txt").write_text("trial\\n", encoding="utf-8")
+            (workspace / "docs").mkdir()
+            (workspace / "docs" / "sales_release_rc1_test_checklist.md").write_text("checklist\\n", encoding="utf-8")
+            dist = workspace / "dist"
+            dist.mkdir()
+            (dist / "AutoBeat5.exe").write_bytes(b"exe")
+            stage = workspace / "stage" / "AutoBeat5"
+            with mock.patch.object(PREPARE, "ROOT", workspace):
+                PREPARE.stage_assets(dist, stage)
+
+            staged_manifest = json.loads((stage / "assets" / "mascots" / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(staged_manifest["mascots"][0]["id"], "cute")
+            self.assertEqual((stage / "assets" / "mascots" / "cute.png").read_bytes(), b"sprite")
+
+    def test_preflight_requires_mascot_catalog(self) -> None:
+        self.assertIn("AutoBeat5/assets/mascots/manifest.json", PREFLIGHT.REQUIRED_ENTRIES)
+
     def test_preflight_rejects_personal_profile_or_unapproved_demo_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             app = self.make_release_app(Path(temporary))

@@ -89,6 +89,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "note_speed": 625.0,
     "playfield_mode": "standard",
     "note_theme": "standard",
+    "mascot_mode": "standard",
+    "mascot_id": "cute",
     "timing_offset_ms": 0,
     "fullscreen": False,
     "resolution": [1280, 720],

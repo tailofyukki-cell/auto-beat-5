@@ -32,7 +32,7 @@ hiddenimports += collect_submodules("scipy._external.array_api_compat")
 
 # Runtime font data is needed by the executable. User-facing assets and
 # license notices are copied to the distribution root by prepare_sales_release.py.
-for folder in ("fonts",):
+for folder in ("fonts", "assets"):
     source = project_root / folder
     if source.exists():
         datas.append((str(source), folder))

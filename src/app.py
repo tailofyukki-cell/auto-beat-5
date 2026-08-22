@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+from bisect import bisect_right
 import os
 import sys
 import time
@@ -20,6 +21,7 @@ from chart_generator import ChartGenerator
 from chart_summary import build_chart_summary
 from chart_validator import ChartValidator
 from gameplay import GameSession, JudgmentWindows
+from mascots import Mascot, find_mascot, load_mascot_catalog
 from models import AnalysisResult, Chart, Difficulty, Judgment, LANE_NAMES, Note
 from persistence import (
     AppPaths,
@@ -67,6 +69,11 @@ PLAYFIELD_MODES: dict[str, tuple[str, float]] = {
     "standard": ("STANDARD", 1.0),
     # 判定時刻は変えず、表示上の到達速度を抑えて先読み時間を増やす。
     "tall": ("TALL FOCUS", 0.82),
+}
+MASCOT_MODES: dict[str, tuple[str, float]] = {
+    "off": ("OFF", 0.0),
+    "subtle": ("SUBTLE", 0.55),
+    "standard": ("STANDARD", 1.0),
 }
 JUDGMENT_COLORS = {Judgment.PERFECT: CYAN, Judgment.GREAT: GREEN, Judgment.GOOD: YELLOW, Judgment.MISS: RED}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac"}
@@ -143,6 +150,15 @@ class AutoBeatApp:
         self.settings.setdefault("note_theme", "standard")
         if self.settings["note_theme"] not in NOTE_THEMES:
             self.settings["note_theme"] = "standard"
+        self.settings.setdefault("mascot_mode", "standard")
+        if self.settings["mascot_mode"] not in MASCOT_MODES:
+            self.settings["mascot_mode"] = "standard"
+        self.settings.setdefault("mascot_id", "cute")
+        self.mascot_catalog = load_mascot_catalog(self.resource_path("assets/mascots"))
+        if not self.mascot_catalog:
+            self.settings["mascot_mode"] = "off"
+        elif find_mascot(self.mascot_catalog, self.settings["mascot_id"]) is None:
+            self.settings["mascot_id"] = self.mascot_catalog[0].mascot_id
         self.settings.setdefault("timing_offset_ms", 0)
         self.settings.setdefault("fullscreen", False)
         self.settings.setdefault("resolution", [1280, 720])
@@ -201,6 +217,8 @@ class AutoBeatApp:
         self.countdown_started_at: float | None = None
         self.calibration: CalibrationSession | None = None
         self.start_banner_until = 0.0
+        self.mascot_image_cache: dict[str, pygame.Surface | None] = {}
+        self.mascot_scaled_cache: dict[tuple[str, int], pygame.Surface] = {}
         self.feedback_sounds = self._build_feedback_sounds()
         self._set_sfx_volume()
 
@@ -315,6 +333,19 @@ class AutoBeatApp:
     @property
     def note_theme_label(self) -> str:
         return NOTE_THEMES[self.note_theme_key][0]
+
+    @property
+    def mascot_mode_key(self) -> str:
+        key = str(self.settings.get("mascot_mode", "standard"))
+        return key if key in MASCOT_MODES else "standard"
+
+    @property
+    def mascot_mode_label(self) -> str:
+        return MASCOT_MODES[self.mascot_mode_key][0]
+
+    @property
+    def selected_mascot(self) -> Mascot | None:
+        return find_mascot(self.mascot_catalog, self.settings.get("mascot_id"))
 
     def text(
         self,
@@ -1275,6 +1306,72 @@ class AutoBeatApp:
         except pygame.error:
             return None
 
+    def _mascot_surface(self, mascot: Mascot, target_height: int) -> pygame.Surface | None:
+        """原画像は一度だけ読み込み、ゲーム中は小さな縮小版だけを変形する。"""
+        if mascot.mascot_id not in self.mascot_image_cache:
+            try:
+                self.mascot_image_cache[mascot.mascot_id] = pygame.image.load(str(mascot.image_path)).convert_alpha()
+            except pygame.error:
+                self.mascot_image_cache[mascot.mascot_id] = None
+        source = self.mascot_image_cache.get(mascot.mascot_id)
+        if source is None:
+            return None
+        cache_key = (mascot.mascot_id, target_height)
+        cached = self.mascot_scaled_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        height = max(1, min(target_height, source.get_height()))
+        width = max(1, round(source.get_width() * height / source.get_height()))
+        cached = pygame.transform.smoothscale(source, (width, height))
+        self.mascot_scaled_cache[cache_key] = cached
+        return cached
+
+    def _mascot_beat_pulse(self, now: float) -> float:
+        """直近の解析ビートから0〜1の短い跳ね返りを作る。"""
+        if self.analysis is not None and self.analysis.beats:
+            beat_index = bisect_right(self.analysis.beats, now) - 1
+            if beat_index >= 0:
+                elapsed = max(0.0, now - float(self.analysis.beats[beat_index]))
+                return max(0.0, 1.0 - elapsed / 0.20)
+        # チュートリアル等で解析データがない時も、一定のリズムで小さく動かす。
+        phase = now % TUTORIAL_BEAT_SECONDS
+        return max(0.0, 1.0 - phase / 0.20)
+
+    def _draw_mascot(self, now: float, left: int, field_width: int, line_y: int) -> None:
+        """ノーツ領域外の横余白に、軽量なビート同期マスコットを描く。"""
+        mascot = self.selected_mascot
+        intensity = MASCOT_MODES[self.mascot_mode_key][1]
+        if mascot is None or intensity <= 0.0:
+            return
+        width, height = self.size
+        side_width = max(0, (width - field_width) // 2)
+        if side_width < 150:
+            return
+        target_height = min(int(height * 0.43), int(side_width * 1.35), 310)
+        target_height = max(150, round(target_height * mascot.scale))
+        base = self._mascot_surface(mascot, target_height)
+        if base is None:
+            return
+        pulse = self._mascot_beat_pulse(now) * intensity
+        sway = math.sin(now * math.tau * 1.15) * intensity
+        bob = sway * 2.5 + pulse * 9.0
+        angle = sway * 1.4 + pulse * 2.2
+        zoom = 1.0 + pulse * 0.035 - abs(sway) * 0.008
+        sprite = pygame.transform.rotozoom(base, angle, zoom)
+        if mascot.anchor == "left":
+            center_x = max(sprite.get_width() // 2 + 18, left - side_width // 2)
+        else:
+            center_x = min(width - sprite.get_width() // 2 - 18, left + field_width + side_width // 2)
+        bottom = min(height - 14, line_y - 8)
+        rect = sprite.get_rect(midbottom=(center_x, int(bottom - bob)))
+        # 右上の曲情報・左上のスコアへ近づかないよう、プレイフィールド下寄りに限定する。
+        if rect.top < 150:
+            rect.top = 150
+        if self.countdown_active or self.game_paused:
+            sprite.set_alpha(145)
+        self.surface.blit(sprite, rect)
+        sprite.set_alpha(None)
+
     def draw_title(self) -> None:
         width, height = self.size
         self.text("AUTO BEAT 5", "title", CYAN, center=(width // 2, height // 2 - 185))
@@ -1630,6 +1727,7 @@ class AutoBeatApp:
                         continue
                     pygame.draw.rect(self.surface, lane_color, pygame.Rect(x, int(y) - cap_height // 2, cap_width, cap_height), border_radius=7)
         self._draw_hit_effects(left, lane_width, line_y)
+        self._draw_mascot(now, left, field_width, line_y)
         self.text(f"SCORE  {self.session.score:07d}", "mono", pos=(45, 45))
         self.text(f"COMBO  {self.session.combo}", "mono", YELLOW, pos=(45, 75))
         if self.practice_active:
@@ -1835,6 +1933,7 @@ class AutoBeatApp:
 
     def _settings_rows(self) -> list[tuple[str, str]]:
         windows = self.settings["judgment_windows_ms"]
+        mascot_name = self.selected_mascot.name if self.selected_mascot else "NO ASSET"
         return [
             ("音楽音量", f"{self.settings['music_volume'] * 100:.0f}%"),
             ("効果音音量", f"{self.settings['sfx_volume'] * 100:.0f}%"),
@@ -1848,31 +1947,33 @@ class AutoBeatApp:
             ("フルスクリーン", "ON" if self.settings["fullscreen"] else "OFF"),
             ("解像度", f"{self.settings['resolution'][0]} x {self.settings['resolution'][1]}"),
             ("入力タイミング測定", "ENTER"),
+            ("マスコット演出", self.mascot_mode_label),
+            ("マスコット", mascot_name),
         ]
 
     def draw_settings(self) -> None:
         width, height = self.size
-        self.heading("SETTINGS", "↑↓で項目選択、←→で変更。プレイ表示・ノーツ配色はENTERでも切替、入力タイミング測定はENTERで開始")
-        self.panel(pygame.Rect(width // 2 - 390, 135, 780, 495))
+        self.heading("SETTINGS", "↑↓で項目選択、←→で変更。マスコットは演出とキャラクターを個別に切替")
+        self.panel(pygame.Rect(width // 2 - 390, 125, 780, 545))
         for index, (name, value) in enumerate(self._settings_rows()):
-            y = 145 + index * 31
-            rect = pygame.Rect(width // 2 - 360, y, 720, 30)
+            y = 136 + index * 27
+            rect = pygame.Rect(width // 2 - 360, y, 720, 26)
             selected = index == self.settings_selection
             if selected:
                 self.panel(rect, (44, 61, 92), 6)
                 pygame.draw.rect(self.surface, CYAN, rect, width=1, border_radius=6)
-            self.text(name, "small" if index >= 4 else "body", pos=(rect.left + 16, rect.top + (6 if index >= 4 else 3)))
-            self.text(value, "mono", CYAN if selected else WHITE, pos=(rect.left + 470, rect.top + 5))
+            self.text(name, "small", pos=(rect.left + 16, rect.top + 4))
+            self.text(value, "small", CYAN if selected else WHITE, pos=(rect.left + 470, rect.top + 4))
             self.buttons.append((rect, lambda selected_index=index: setattr(self, "settings_selection", selected_index)))
-        self.text("KEY CONFIG", "body", YELLOW, pos=(width // 2 - 360, 523))
+        self.text("KEY CONFIG", "small", YELLOW, pos=(width // 2 - 360, 520))
         for lane, name in enumerate(LANE_NAMES):
-            y = 555 + (lane // 3) * 40
+            y = 543 + (lane // 3) * 35
             x = width // 2 - 360 + (lane % 3) * 240
-            rect = pygame.Rect(x, y, 215, 32)
+            rect = pygame.Rect(x, y, 215, 29)
             self.panel(rect, (52, 46, 73) if self.key_capture_lane == lane else PANEL_DARK, 8)
             self.text(f"{name}: {self.settings['keys'][lane].upper()}", "small", center=rect.center)
             self.buttons.append((rect, lambda selected=lane: setattr(self, "key_capture_lane", selected)))
-        self.button("設定を保存", pygame.Rect(width // 2 - 175, 638, 350, 42), self.persist_settings, accent=GREEN)
+        self.button("設定を保存", pygame.Rect(width // 2 - 175, 625, 350, 38), self.persist_settings, accent=GREEN)
         self.button("タイトルへ", pygame.Rect(45, height - 65, 150, 40), lambda: self.set_screen("title"), accent=MUTED)
 
     def draw_calibration(self) -> None:
@@ -1959,6 +2060,16 @@ class AutoBeatApp:
             self.settings["resolution"] = list(RESOLUTION_PRESETS[resolution_index])
             if not self.settings["fullscreen"]:
                 self._apply_display_settings()
+        elif index == 12:
+            modes = list(MASCOT_MODES)
+            current_mode = self.mascot_mode_key
+            current_index = modes.index(current_mode)
+            self.settings["mascot_mode"] = modes[(current_index + direction) % len(modes)]
+        elif index == 13 and self.mascot_catalog:
+            mascot_ids = [mascot.mascot_id for mascot in self.mascot_catalog]
+            selected = self.selected_mascot or self.mascot_catalog[0]
+            current_index = mascot_ids.index(selected.mascot_id)
+            self.settings["mascot_id"] = mascot_ids[(current_index + direction) % len(mascot_ids)]
         self.message = "設定を変更しました。保存してください。"
 
     def persist_settings(self) -> None:
@@ -2146,7 +2257,7 @@ class AutoBeatApp:
                 self.adjust_setting(-1)
             elif event.key == pygame.K_RIGHT:
                 self.adjust_setting(1)
-            elif event.key in (pygame.K_RETURN, pygame.K_SPACE) and self.settings_selection in (3, 8):
+            elif event.key in (pygame.K_RETURN, pygame.K_SPACE) and self.settings_selection in (3, 8, 12, 13):
                 self.adjust_setting(1)
             elif event.key in (pygame.K_RETURN, pygame.K_SPACE) and self.settings_selection == 11:
                 self.begin_calibration()

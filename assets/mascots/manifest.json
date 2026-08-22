@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "mascots": [
+    {
+      "id": "cute",
+      "name": "CUTE IDOL",
+      "file": "cute.png",
+      "scale": 1.0,
+      "anchor": "right"
+    }
+  ]
+}

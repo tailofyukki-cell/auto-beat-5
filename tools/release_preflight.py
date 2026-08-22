@@ -22,6 +22,7 @@ REQUIRED_ENTRIES = (
     "AutoBeat5/RC1_TEST_CHECKLIST.md",
     "AutoBeat5/RELEASE_CHANNEL.txt",
     "AutoBeat5/demo_songs/demo_manifest.json",
+    "AutoBeat5/assets/mascots/manifest.json",
     "AutoBeat5/rewards/reward_config.json",
     "AutoBeat5/licenses/INDEX.md",
     "AutoBeat5/licenses/SBOM.json",
