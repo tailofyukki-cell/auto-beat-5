@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from analyzer import MusicAnalyzer
+from chart_generator import ChartGenerator
+from models import Difficulty
 
 
 class AnalysisTest(unittest.TestCase):
@@ -56,6 +59,16 @@ class AnalysisTest(unittest.TestCase):
         self.assertGreater(result.duration, 3.9)
         self.assertGreater(result.bpm, 40)
         self.assertGreater(len(result.onsets), 2)
+
+    def test_release_probe_fixture_uses_pcm_fallback_and_generates_chart(self) -> None:
+        fixture = Path(__file__).resolve().parent / "fixtures" / "通常音源_日本語パス_PCM.wav"
+        self.assertTrue(fixture.is_file())
+        with patch.dict(os.environ, {"AUTOBEAT_FORCE_PRIMARY_AUDIO_FAILURE": "1"}):
+            result = MusicAnalyzer().analyze(fixture)
+        chart = ChartGenerator().generate(result, Difficulty.BEGINNER)
+        self.assertGreater(result.duration, 5.9)
+        self.assertGreater(result.bpm, 40)
+        self.assertGreater(len(chart.notes), 0)
 
 
 if __name__ == "__main__":

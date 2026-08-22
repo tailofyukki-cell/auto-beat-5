@@ -1,6 +1,7 @@
 """音源を解析し、譜面生成に必要な軽量特徴量を作る。"""
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import wave
@@ -52,20 +53,35 @@ class MusicAnalyzer:
 
         self._report(0.05, "音源を読み込んでいます")
         try:
+            if os.environ.get("AUTOBEAT_FORCE_PRIMARY_AUDIO_FAILURE") == "1":
+                raise RuntimeError("forced primary audio decoder failure")
             signal, sample_rate = librosa.load(str(source), sr=self.SAMPLE_RATE, mono=True)
         except Exception as primary_error:  # ライブラリ例外をそのままUIへ漏らさない
-            # PyInstaller環境などでsoundfile/codec初期化に失敗しても、標準PCM WAVは直接復元できる。
+            # PyInstaller環境などでsoundfile/codec初期化に失敗しても、標準PCM WAVは
+            # Python標準ライブラリで、圧縮音源はSDL_mixerで復元を試みる。
+            fallback_errors: list[Exception] = []
             if source.suffix.lower() == ".wav":
                 try:
-                    signal, sample_rate = self._load_pcm_wav(source, librosa)
+                    signal, sample_rate = self._load_pcm_wav(source)
                 except Exception as fallback_error:
+                    fallback_errors.append(fallback_error)
+                else:
+                    fallback_errors.clear()
+            if fallback_errors or source.suffix.lower() != ".wav":
+                try:
+                    signal, sample_rate = self._load_with_pygame(source)
+                except Exception as fallback_error:
+                    fallback_errors.append(fallback_error)
+                else:
+                    fallback_errors.clear()
+            if fallback_errors:
+                if source.suffix.lower() == ".wav":
                     raise AnalysisError(
                         "WAV音源を読み込めませんでした。PCM形式で保存し直すか、別の音声形式を選択してください。"
-                    ) from fallback_error
-            else:
+                    ) from fallback_errors[-1]
                 raise AnalysisError(
                     "音源をデコードできませんでした。ファイルの破損または非対応コーデックの可能性があります。"
-                ) from primary_error
+                ) from fallback_errors[-1]
         if signal.size < self.HOP_LENGTH:
             raise AnalysisError("音源が短すぎるため解析できません。")
 
@@ -162,7 +178,7 @@ class MusicAnalyzer:
         self._report(1.0, "解析が完了しました")
         return result
 
-    def _load_pcm_wav(self, source: Path, librosa: object) -> tuple[np.ndarray, int]:
+    def _load_pcm_wav(self, source: Path) -> tuple[np.ndarray, int]:
         """外部デコーダーが利用できない場合に、非圧縮PCM WAVを標準ライブラリで復元する。"""
         with wave.open(str(source), "rb") as audio:
             if audio.getcomptype() != "NONE":
@@ -193,10 +209,53 @@ class MusicAnalyzer:
         if len(values) % channels:
             raise AnalysisError("PCM WAVのチャンネルデータ長が不正です。")
         signal = values.reshape(-1, channels).mean(axis=1, dtype=np.float32)
-        if sample_rate != self.SAMPLE_RATE:
-            signal = librosa.resample(signal, orig_sr=sample_rate, target_sr=self.SAMPLE_RATE)
-            sample_rate = self.SAMPLE_RATE
-        return np.asarray(signal, dtype=np.float32), int(sample_rate)
+        return self._resample_signal(signal, sample_rate)
+
+    def _load_with_pygame(self, source: Path) -> tuple[np.ndarray, int]:
+        """Decode supported audio through SDL_mixer when librosa's loader fails.
+
+        pygame is already a required runtime component for the game. Its decoder
+        is therefore a more reliable packaged fallback than a system ffmpeg.
+        """
+        import pygame
+
+        if not pygame.mixer.get_init():
+            pygame.mixer.init(frequency=self.SAMPLE_RATE, size=-16, channels=2)
+        mixer_info = pygame.mixer.get_init()
+        if not mixer_info:
+            raise AnalysisError("SDL_mixerを初期化できませんでした。")
+        sample_rate, sample_format, channels = mixer_info
+        bytes_per_sample = abs(int(sample_format)) // 8
+        if channels <= 0 or bytes_per_sample not in {1, 2, 4}:
+            raise AnalysisError("SDL_mixerの音声形式に対応していません。")
+        sound = pygame.mixer.Sound(str(source))
+        raw = sound.get_raw()
+        if not raw:
+            raise AnalysisError("SDL_mixerが音声データを返しませんでした。")
+        if bytes_per_sample == 1:
+            # SDL's 8-bit mixer output is unsigned PCM.
+            values = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+        elif bytes_per_sample == 2:
+            values = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+        else:
+            values = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
+        if len(values) % channels:
+            raise AnalysisError("SDL_mixerのチャンネルデータ長が不正です。")
+        signal = values.reshape(-1, channels).mean(axis=1, dtype=np.float32)
+        return self._resample_signal(signal, int(sample_rate))
+
+    def _resample_signal(self, signal: np.ndarray, sample_rate: int) -> tuple[np.ndarray, int]:
+        """Resample without requiring an optional external resampling backend."""
+        signal = np.asarray(signal, dtype=np.float32)
+        if sample_rate <= 0:
+            raise AnalysisError("音源のサンプルレートが不正です。")
+        if sample_rate == self.SAMPLE_RATE:
+            return signal, int(sample_rate)
+        output_length = max(1, int(round(len(signal) * self.SAMPLE_RATE / sample_rate)))
+        source_index = np.arange(len(signal), dtype=np.float64)
+        target_index = np.linspace(0.0, max(0.0, len(signal) - 1.0), output_length, dtype=np.float64)
+        converted = np.interp(target_index, source_index, signal).astype(np.float32)
+        return converted, self.SAMPLE_RATE
 
     @staticmethod
     def _local_bpm_pairs(beat_times: np.ndarray, fallback_bpm: float) -> list[tuple[float, float]]:

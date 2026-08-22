@@ -29,6 +29,8 @@ REQUIRED_ENTRIES = (
     "AutoBeat5/licenses/third_party/libsndfile/COPYING",
     "AutoBeat5/licenses/third_party/pygame/LGPL-2.1.txt",
 )
+AUDIO_PROBE_FIXTURE = ROOT / "tests" / "fixtures" / "通常音源_日本語パス_PCM.wav"
+
 FORBIDDEN_COMPONENTS = (
     "openai",
     "torch",
@@ -150,6 +152,48 @@ def expand_with_windows(archive_path: Path, output_dir: Path) -> Path:
     return app_dir
 
 
+def run_release_audio_probe(app_dir: Path, work_dir: Path) -> None:
+    """Verify an expanded release exe can analyze a Japanese-path PCM WAV.
+
+    The probe forces the primary librosa loader to fail inside the frozen app,
+    ensuring the packaged fallback decoder is exercised rather than merely the
+    development environment's codec stack.
+    """
+    if not AUDIO_PROBE_FIXTURE.is_file():
+        raise RuntimeError(f"Required audio probe fixture is missing: {AUDIO_PROBE_FIXTURE}")
+    probe_dir = work_dir / "audio_probe_日本語"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    target = probe_dir / "通常音源_日本語パス_PCM.wav"
+    shutil.copy2(AUDIO_PROBE_FIXTURE, target)
+    result_path = work_dir / "audio_probe_result.json"
+    environment = os.environ.copy()
+    environment["SDL_VIDEODRIVER"] = "dummy"
+    environment["SDL_AUDIODRIVER"] = "dummy"
+    environment.pop("AUTOBEAT_DATA_DIR", None)
+    environment["APPDATA"] = str(work_dir / "audio_probe_appdata")
+    environment["AUTOBEAT_RELEASE_AUDIO_PROBE_PATH"] = str(target)
+    environment["AUTOBEAT_RELEASE_AUDIO_PROBE_RESULT"] = str(result_path)
+    environment["AUTOBEAT_FORCE_PRIMARY_AUDIO_FAILURE"] = "1"
+    process = subprocess.run(
+        [str(app_dir / "AutoBeat5.exe")],
+        cwd=app_dir,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    if not result_path.is_file():
+        raise RuntimeError(f"Release audio probe did not write a result (exit {process.returncode})")
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("Release audio probe result is invalid") from error
+    if process.returncode != 0 or not payload.get("success"):
+        raise RuntimeError(f"Release audio probe failed: {payload.get('error', 'unknown error')}")
+    if not isinstance(payload.get("note_count"), int) or int(payload["note_count"]) <= 0:
+        raise RuntimeError("Release audio probe generated no BEGINNER notes")
+
+
 def smoke_test_exe(app_dir: Path, work_dir: Path) -> None:
     environment = os.environ.copy()
     environment["SDL_VIDEODRIVER"] = "dummy"
@@ -193,16 +237,18 @@ def main() -> None:
     if not archive_path.is_file():
         raise SystemExit(f"Release ZIP was not found: {archive_path}")
 
-    print("STEP 1/3: validating ZIP entries and UTF-8 filename flags", flush=True)
+    print("STEP 1/4: validating ZIP entries and UTF-8 filename flags", flush=True)
     japanese_count = assert_zip_contents(archive_path)
     with tempfile.TemporaryDirectory(prefix="autobeat5_release_preflight_") as temporary:
         work_dir = Path(temporary)
-        print("STEP 2/3: expanding with Windows Expand-Archive", flush=True)
+        print("STEP 2/4: expanding with Windows Expand-Archive", flush=True)
         app_dir = expand_with_windows(archive_path, work_dir)
         assert_demo_bundle_is_allowlisted(app_dir)
         if not arguments.skip_smoke:
-            print("STEP 3/3: smoke-testing AutoBeat5.exe", flush=True)
+            print("STEP 3/4: smoke-testing AutoBeat5.exe", flush=True)
             smoke_test_exe(app_dir, work_dir)
+            print("STEP 4/4: probing Japanese-path PCM WAV analysis in packaged exe", flush=True)
+            run_release_audio_probe(app_dir, work_dir)
 
     print(f"RELEASE PREFLIGHT PASSED: {archive_path}")
     print(f"sha256={sha256(archive_path)}")

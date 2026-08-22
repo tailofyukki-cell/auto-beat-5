@@ -25,6 +25,11 @@ for package in ("pygame", "librosa", "soundfile", "scipy", "sklearn", "numba", "
     binaries += collect_dynamic_libs(package)
     hiddenimports += collect_submodules(package, filter=is_runtime_module)
 
+# SciPy 1.18 loads this compatibility namespace dynamically from its
+# FFT path. Static PyInstaller analysis can miss it, so include its concrete
+# modules explicitly; the release audio probe verifies this in the frozen exe.
+hiddenimports += collect_submodules("scipy._external.array_api_compat")
+
 # Runtime font data is needed by the executable. User-facing assets and
 # license notices are copied to the distribution root by prepare_sales_release.py.
 for folder in ("fonts",):
