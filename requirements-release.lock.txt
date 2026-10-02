@@ -16,6 +16,7 @@ numba==0.67.0
 numpy==2.3.5
 packaging==26.3
 pefile==2024.8.26
+Pillow==11.3.0
 platformdirs==4.11.3
 pooch==1.9.0
 pycparser==3.0

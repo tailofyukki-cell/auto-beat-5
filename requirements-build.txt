@@ -1,0 +1,2 @@
+# Build/test only. PIL remains excluded from the game executable.
+Pillow==11.3.0

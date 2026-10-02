@@ -21,6 +21,7 @@ from app import AutoBeatApp, COUNTDOWN_SECONDS
 from chart_generator import ChartGenerator
 from gameplay import GameSession, JudgmentWindows
 from models import AnalysisResult, Chart, Difficulty, Note, NoteType
+from persistence import active_library_folder, assign_recent_song_folder, library_folders, record_recent_song, set_active_library_folder
 
 
 class FakePracticeAudio:
@@ -125,6 +126,58 @@ class PlaylistPracticeTest(unittest.TestCase):
         self.app.select_playlist_entry(next(index for index, entry in enumerate(entries) if entry.music_hash == demo_hash))
         self.assertEqual(selected[0]["music_hash"], demo_hash)
         self.assertEqual(selected[0]["source_path"], str(user_same))
+
+
+    def test_library_folders_filter_playlist_and_remember_last_opened(self) -> None:
+        home_song = Path(self.directory.name) / "home.mp3"
+        work_song = Path(self.directory.name) / "work.mp3"
+        home_song.write_bytes(b"home")
+        work_song.write_bytes(b"work")
+        self.app.profile["recent_songs"] = [
+            {"music_hash": "h" * 64, "source_path": str(home_song), "bpm": 100.0, "duration": 80.0, "last_used": "2026-01-01T00:00:00+00:00"},
+            {"music_hash": "w" * 64, "source_path": str(work_song), "bpm": 130.0, "duration": 90.0, "last_used": "2026-01-02T00:00:00+00:00", "folder": "作業用"},
+        ]
+        self.assertEqual(active_library_folder(self.app.profile), "ホーム")
+        self.assertEqual([entry.path.name for entry in self.app.playlist_entries()], ["home.mp3"])
+
+        set_active_library_folder(self.app.paths, self.app.profile, "作業用")
+        self.assertEqual(active_library_folder(self.app.profile), "作業用")
+        self.assertEqual([entry.path.name for entry in self.app.playlist_entries()], ["work.mp3"])
+
+        restored = self.app.profile
+        self.assertIn("作業用", library_folders(restored))
+
+    def test_selected_user_song_can_move_to_current_playlist_folder(self) -> None:
+        song = Path(self.directory.name) / "move.mp3"
+        song.write_bytes(b"move")
+        self.app.profile["recent_songs"] = [
+            {"music_hash": "m" * 64, "source_path": str(song), "bpm": 100.0, "duration": 80.0, "last_used": "2026-01-01T00:00:00+00:00"},
+        ]
+        set_active_library_folder(self.app.paths, self.app.profile, "お気に入り")
+        self.app.playlist_selected_index = 0
+        changed = assign_recent_song_folder(self.app.paths, self.app.profile, "m" * 64, str(song), "お気に入り")
+
+        self.assertTrue(changed)
+        self.assertEqual(self.app.profile["recent_songs"][0]["folder"], "お気に入り")
+        self.assertEqual([entry.path.name for entry in self.app.playlist_entries()], ["move.mp3"])
+
+    def test_record_recent_song_preserves_existing_folder(self) -> None:
+        analysis = AnalysisResult(
+            "r" * 64,
+            str(Path(self.directory.name) / "foldered.wav"),
+            12.0,
+            22050,
+            128.0,
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
+        self.app.profile["recent_songs"] = [{"music_hash": analysis.music_hash, "source_path": analysis.source_path, "folder": "練習"}]
+        record_recent_song(self.app.paths, self.app.profile, analysis)
+        self.assertEqual(self.app.profile["recent_songs"][0]["folder"], "練習")
 
     def test_title_practice_to_demo_cache_reaches_practice_setup(self) -> None:
         demo = self.app.paths.demo_songs / "trial.mp3"

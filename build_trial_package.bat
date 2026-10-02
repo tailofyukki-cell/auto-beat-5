@@ -16,6 +16,9 @@ if %errorlevel% neq 0 (
   pause
   exit /b 1
 )
+if not exist "release\_staging\AutoBeat5\rewards\locked" mkdir "release\_staging\AutoBeat5\rewards\locked"
+if not exist "release\_staging\AutoBeat5\rewards\unlocked" mkdir "release\_staging\AutoBeat5\rewards\unlocked"
+attrib +h "release\_staging\AutoBeat5\rewards\locked" >nul 2>nul
 xcopy "assets" "release\_staging\AutoBeat5\assets\" /E /I /Y >nul
 if %errorlevel% neq 0 (
   echo ERROR: Failed to copy assets folder.
@@ -35,7 +38,19 @@ if %errorlevel% neq 0 (
   pause
   exit /b 1
 )
-python tools\package_trial_zip.py
+python tools\build_user_guide_pdf.py
+if %errorlevel% neq 0 (
+  echo ERROR: Failed to build user guide PDF.
+  pause
+  exit /b 1
+)
+copy /Y "docs\AutoBeat5_User_Guide.pdf" "release\_staging\AutoBeat5\AutoBeat5_User_Guide.pdf" >nul
+if %errorlevel% neq 0 (
+  echo ERROR: Failed to copy user guide PDF.
+  pause
+  exit /b 1
+)
+python tools\package_trial_zip.py --trial
 if %errorlevel% neq 0 (
   echo ERROR: Failed to create UTF-8 ZIP package.
   pause
@@ -43,3 +58,4 @@ if %errorlevel% neq 0 (
 )
 echo Trial ZIP created: release\AutoBeat5_Trial_Windows.zip
 pause
+

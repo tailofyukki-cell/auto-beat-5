@@ -1,7 +1,8 @@
-AutoBeat 5 Trial Version
+オトアソビ - 好きな曲を、遊ぼう。
+Trial Version (formerly AutoBeat 5)
 =========================
 
-Thank you for playing AutoBeat 5 Trial Version.
+Thank you for playing Otoasobi Trial Version.
 
 How to start
 ------------

@@ -2,9 +2,65 @@
   "version": 1,
   "mascots": [
     {
+      "id": "rhythm",
+      "name": "RHYTHM",
+      "file": "rhythm.png",
+      "scale": 1.0,
+      "anchor": "right"
+    },
+    {
       "id": "cute",
       "name": "CUTE IDOL",
       "file": "cute.png",
+      "scale": 1.0,
+      "anchor": "right"
+    },
+    {
+      "id": "sexy2",
+      "name": "SEXY 2 IDOL",
+      "file": "sexy2.png",
+      "scale": 1.0,
+      "anchor": "right"
+    },
+    {
+      "id": "cool",
+      "name": "COOL IDOL",
+      "file": "cool.png",
+      "scale": 1.0,
+      "anchor": "right"
+    },
+    {
+      "id": "powerful",
+      "name": "POWERFUL IDOL",
+      "file": "powerful.png",
+      "scale": 1.0,
+      "anchor": "right"
+    },
+    {
+      "id": "sexy",
+      "name": "SEXY IDOL",
+      "file": "sexy.png",
+      "scale": 1.0,
+      "anchor": "right"
+    },
+    {
+      "id": "pixy",
+      "name": "PIXY IDOL",
+      "file": "pixy.png",
+      "scale": 1.0,
+      "anchor": "right"
+    },
+    {
+      "id": "neon",
+      "name": "NEON IDOL",
+      "file": "neon.png",
+      "scale": 1.0,
+      "anchor": "right"
+    },
+    {
+      "id": "dj",
+      "name": "DJ IDOL",
+      "file": "DJ.png",
       "scale": 1.0,
       "anchor": "right"
     }

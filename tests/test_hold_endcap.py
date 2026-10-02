@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -50,6 +51,53 @@ class HoldEndCapTest(unittest.TestCase):
         cap_center_x = left + 2 * lane_width + lane_width // 2
         pixel = self.app.surface.get_at((cap_center_x, end_y))[:3]
         self.assertEqual(pixel, self.app.lane_colors[2])
+
+    def test_perspective_long_hold_pixels_stay_inside_their_lane(self) -> None:
+        self.app.settings["lane_view"] = "perspective"
+        self.app.profile["unlocked_features"] = ["lane.3", "lane.5", "lane.7"]
+        for count in (3, 5, 7):
+            self.app.settings["lane_count"] = count
+            self.app.chart.metadata["lane_count"] = count
+            self.app._normalize_lane_runtime_settings()
+            left, width, lane_width, top, bottom = self.app._game_field_geometry()
+            for lane in range(count):
+                for first, last in ((top - 4000, bottom + 4000), (top - 900, top + 30),
+                                    (bottom - 30, bottom + 900)):
+                    self.app.surface.fill((0, 0, 0))
+                    self.app._draw_perspective_hold_rail(lane, first, last, left, width, lane_width, top, bottom, (71, 215, 255))
+                    painted = pygame.mask.from_threshold(self.app.surface, (0, 0, 0), (1, 1, 1, 255))
+                    painted.invert()
+                    self.assertGreater(painted.count(), 0)
+                    allowed = pygame.Surface(self.app.size, pygame.SRCALPHA)
+                    x0, w0, _ = self.app._perspective_lane_rect(lane, top, left, width, lane_width, top, bottom)
+                    x1, w1, _ = self.app._perspective_lane_rect(lane, bottom, left, width, lane_width, top, bottom)
+                    pygame.draw.polygon(allowed, (255, 255, 255, 255), [(x0, top), (x0+w0, top), (x1+w1, bottom), (x1, bottom)])
+                    painted.erase(pygame.mask.from_surface(allowed), (0, 0))
+                    self.assertEqual(painted.count(), 0, (count, lane, first, last))
+
+    def test_classic_hold_rail_is_centered_and_clipped(self) -> None:
+        left, _, lane_width, top, bottom = self.app._game_field_geometry()
+        with patch.object(self.app, "_draw_hold_rail", wraps=self.app._draw_hold_rail) as draw_rail:
+            self.app.draw()
+        self.assertTrue(draw_rail.called)
+        rect = draw_rail.call_args.args[0]
+        self.assertEqual(rect.centerx, left + 2 * lane_width + lane_width // 2)
+        self.assertGreaterEqual(rect.top, top)
+        self.assertLessEqual(rect.bottom, bottom)
+
+    def test_active_hold_draws_spark_glow_near_judgment_line(self) -> None:
+        self.app.session.press(2, 1.5)
+        left, _field_width, lane_width, field_top, line_y = self.app._game_field_geometry()
+        lane_x = left + 2 * lane_width
+        self.app.surface.fill((18, 28, 48), pygame.Rect(lane_x, field_top, lane_width - 2, line_y - field_top))
+
+        self.app._draw_hold_sparks(left, lane_width, field_top, line_y, now=2.0)
+
+        glow_x = lane_x + lane_width // 2
+        glow_y = line_y - 24
+        self.assertNotEqual(self.app.surface.get_at((glow_x, glow_y))[:3], (18, 28, 48))
+        self.assertEqual(self.app._active_hold_lanes(), {2})
+
 
 
 if __name__ == "__main__":

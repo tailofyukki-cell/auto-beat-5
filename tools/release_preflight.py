@@ -15,20 +15,19 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ZIP = ROOT / "release" / "AutoBeat5_Trial_Windows.zip"
+DEFAULT_ZIP = ROOT / "release" / "Otoasobi_Windows.zip"
 REQUIRED_ENTRIES = (
-    "AutoBeat5/AutoBeat5.exe",
-    "AutoBeat5/TRIAL_README.txt",
-    "AutoBeat5/RC1_TEST_CHECKLIST.md",
-    "AutoBeat5/RELEASE_CHANNEL.txt",
-    "AutoBeat5/demo_songs/demo_manifest.json",
-    "AutoBeat5/assets/mascots/manifest.json",
-    "AutoBeat5/rewards/reward_config.json",
-    "AutoBeat5/licenses/INDEX.md",
-    "AutoBeat5/licenses/SBOM.json",
-    "AutoBeat5/licenses/NotoSansCJK-OFL-1.1.txt",
-    "AutoBeat5/licenses/third_party/libsndfile/COPYING",
-    "AutoBeat5/licenses/third_party/pygame/LGPL-2.1.txt",
+    "Otoasobi/Otoasobi.exe",
+    "Otoasobi/README.txt",
+    "Otoasobi/Otoasobi_User_Guide.pdf",
+    "Otoasobi/demo_songs/demo_manifest.json",
+    "Otoasobi/assets/mascots/manifest.json",
+    "Otoasobi/rewards/reward_config.json",
+    "Otoasobi/licenses/INDEX.md",
+    "Otoasobi/licenses/SBOM.json",
+    "Otoasobi/licenses/NotoSansCJK-OFL-1.1.txt",
+    "Otoasobi/licenses/third_party/libsndfile/COPYING",
+    "Otoasobi/licenses/third_party/pygame/LGPL-2.1.txt",
 )
 AUDIO_PROBE_FIXTURE = ROOT / "tests" / "fixtures" / "通常音源_日本語パス_PCM.wav"
 
@@ -58,9 +57,9 @@ def assert_demo_bundle_is_allowlisted(app_dir: Path) -> None:
         if (app_dir / forbidden_name).exists():
             raise RuntimeError(f"Personal player data is present in release root: {forbidden_name}")
 
-    marker = app_dir / "RELEASE_CHANNEL.txt"
-    if marker.read_text(encoding="utf-8").strip() != "AutoBeat5_Release_RC1":
-        raise RuntimeError("Release data namespace marker is missing or invalid")
+    for name in ("RC1_TEST_CHECKLIST.md", "RELEASE_CHANNEL.txt"):
+        if (app_dir / name).exists():
+            raise RuntimeError(f"Internal release file must not be distributed: {name}")
 
     demo_root = app_dir / "demo_songs"
     try:
@@ -104,12 +103,35 @@ def assert_demo_bundle_is_allowlisted(app_dir: Path) -> None:
         raise RuntimeError("Release demo chart hashes do not exactly match the manifest")
 
 
+
+
+def assert_reward_bundle(app_dir: Path) -> None:
+    rewards = app_dir / "rewards"
+    if not (rewards / "reward_config.json").is_file():
+        raise RuntimeError("Reward config is missing")
+    locked = rewards / "locked"
+    unlocked = rewards / "unlocked"
+    if not locked.is_dir():
+        raise RuntimeError("Locked reward folder is missing")
+    if not unlocked.is_dir():
+        raise RuntimeError("Unlocked reward folder is missing")
+    images = [path for path in rewards.rglob("*") if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
+    if not images:
+        raise RuntimeError("No reward image was found in the release bundle")
+
+
 def assert_zip_contents(archive_path: Path) -> int:
     with zipfile.ZipFile(archive_path) as archive:
         entries = {item.filename: item for item in archive.infolist()}
     missing = [name for name in REQUIRED_ENTRIES if name not in entries]
     if missing:
         raise RuntimeError(f"Missing required release entries: {missing}")
+    for name in entries:
+        if name.startswith("AutoBeat5/") or name in {
+            "Otoasobi/AutoBeat5.exe", "Otoasobi/AutoBeat5_User_Guide.pdf",
+            "Otoasobi/RC1_TEST_CHECKLIST.md", "Otoasobi/RELEASE_CHANNEL.txt",
+        }:
+            raise RuntimeError(f"Obsolete or internal release entry: {name}")
 
     japanese_entries = [item for item in entries.values() if any(ord(char) > 127 for char in item.filename)]
     if not japanese_entries:
@@ -124,8 +146,8 @@ def assert_zip_contents(archive_path: Path) -> int:
     lowered_paths = [name.casefold() for name in entries]
     leaked = []
     for component in FORBIDDEN_COMPONENTS:
-        package_prefix = f"autobeat5/_internal/{component.casefold()}/"
-        dist_prefix = f"autobeat5/_internal/{component.casefold()}-"
+        package_prefix = f"otoasobi/_internal/{component.casefold()}/"
+        dist_prefix = f"otoasobi/_internal/{component.casefold()}-"
         if any(name.startswith(package_prefix) or name.startswith(dist_prefix) for name in lowered_paths):
             leaked.append(component)
     if leaked:
@@ -144,9 +166,9 @@ def expand_with_windows(archive_path: Path, output_dir: Path) -> Path:
         f"Expand-Archive -LiteralPath '{archive_path}' -DestinationPath '{expanded_root}' -Force",
     ]
     subprocess.run(command, check=True, capture_output=True, text=True)
-    app_dir = expanded_root / "AutoBeat5"
-    if not (app_dir / "AutoBeat5.exe").is_file():
-        raise RuntimeError("Windows extraction did not create AutoBeat5.exe.")
+    app_dir = expanded_root / "Otoasobi"
+    if not (app_dir / "Otoasobi.exe").is_file():
+        raise RuntimeError("Windows extraction did not create Otoasobi.exe.")
     japanese_files = [path for path in app_dir.rglob("*") if path.is_file() and any(ord(char) > 127 for char in path.name)]
     if not japanese_files:
         raise RuntimeError("Windows extraction did not preserve any Japanese filename.")
@@ -176,7 +198,7 @@ def run_release_audio_probe(app_dir: Path, work_dir: Path) -> None:
     environment["AUTOBEAT_RELEASE_AUDIO_PROBE_RESULT"] = str(result_path)
     environment["AUTOBEAT_FORCE_PRIMARY_AUDIO_FAILURE"] = "1"
     process = subprocess.run(
-        [str(app_dir / "AutoBeat5.exe")],
+        [str(app_dir / "Otoasobi.exe")],
         cwd=app_dir,
         env=environment,
         capture_output=True,
@@ -201,12 +223,12 @@ def smoke_test_exe(app_dir: Path, work_dir: Path) -> None:
     environment["SDL_AUDIODRIVER"] = "dummy"
     # Do not bypass AppPaths with AUTOBEAT_DATA_DIR here. A sales build must
     # prove that it uses its own release channel rather than a developer's
-    # existing AutoBeat5 profile.
+    # existing Otoasobi profile.
     environment.pop("AUTOBEAT_DATA_DIR", None)
     appdata_root = work_dir / "appdata"
     environment["APPDATA"] = str(appdata_root)
     process = subprocess.Popen(
-        [str(app_dir / "AutoBeat5.exe")],
+        [str(app_dir / "Otoasobi.exe")],
         cwd=app_dir,
         env=environment,
         stdout=subprocess.DEVNULL,
@@ -215,7 +237,7 @@ def smoke_test_exe(app_dir: Path, work_dir: Path) -> None:
     time.sleep(4)
     exit_code = process.poll()
     if exit_code is not None:
-        raise RuntimeError(f"AutoBeat5.exe exited during smoke test: {exit_code}")
+        raise RuntimeError(f"Otoasobi.exe exited during smoke test: {exit_code}")
     release_namespace = appdata_root / "AutoBeat5_Release_RC1"
     if not release_namespace.is_dir():
         raise RuntimeError("Sales release did not create its isolated AppData namespace")
@@ -245,8 +267,9 @@ def main() -> None:
         print("STEP 2/4: expanding with Windows Expand-Archive", flush=True)
         app_dir = expand_with_windows(archive_path, work_dir)
         assert_demo_bundle_is_allowlisted(app_dir)
+        assert_reward_bundle(app_dir)
         if not arguments.skip_smoke:
-            print("STEP 3/4: smoke-testing AutoBeat5.exe", flush=True)
+            print("STEP 3/4: smoke-testing Otoasobi.exe", flush=True)
             smoke_test_exe(app_dir, work_dir)
             print("STEP 4/4: probing Japanese-path PCM WAV analysis in packaged exe", flush=True)
             run_release_audio_probe(app_dir, work_dir)
@@ -258,3 +281,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

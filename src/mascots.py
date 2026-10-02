@@ -1,6 +1,7 @@
 """ゲーム中のマスコット資産を、安全かつ拡張可能に読み込む。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -23,18 +24,19 @@ class Mascot:
 
 
 def load_mascot_catalog(directory: Path) -> tuple[Mascot, ...]:
-    """manifest.jsonに記載された画像だけを、順序を保って読み込む。
+    """manifest.jsonを優先し、未記載の画像も候補として読み込む。
 
     壊れた定義や存在しない画像は無視する。ゲーム本体はマスコットなしでも起動可能。
+    PNG / WebPを同じフォルダへ追加するだけでも設定画面の候補に出る。
     """
     manifest_path = directory / "manifest.json"
     try:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
         entries = raw.get("mascots", [])
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return ()
+        entries = []
     if not isinstance(entries, list):
-        return ()
+        entries = []
 
     catalog: list[Mascot] = []
     seen_ids: set[str] = set()
@@ -59,6 +61,24 @@ def load_mascot_catalog(directory: Path) -> tuple[Mascot, ...]:
             anchor = "right"
         name = str(raw_entry.get("name", mascot_id.upper())).strip() or mascot_id.upper()
         catalog.append(Mascot(mascot_id, name, image_path, scale, anchor))
+        seen_ids.add(mascot_id)
+    try:
+        image_paths = sorted(directory.iterdir(), key=lambda path: path.name.casefold())
+    except OSError:
+        return tuple(catalog)
+
+    for image_path in image_paths:
+        if image_path.suffix.casefold() not in SUPPORTED_MASCOT_IMAGES or not image_path.is_file():
+            continue
+        mascot_id = image_path.stem.casefold()
+        mascot_id = re.sub(r"[^a-z0-9_-]+", "-", mascot_id).strip("-_")
+        if not _MASCOT_ID.fullmatch(mascot_id):
+            digest = hashlib.sha1(image_path.name.encode("utf-8")).hexdigest()[:8]
+            mascot_id = f"mascot-{digest}"
+        if mascot_id in seen_ids:
+            continue
+        name = image_path.stem.replace("_", " ").replace("-", " ").strip().upper() or mascot_id.upper()
+        catalog.append(Mascot(mascot_id, name, image_path))
         seen_ids.add(mascot_id)
     return tuple(catalog)
 

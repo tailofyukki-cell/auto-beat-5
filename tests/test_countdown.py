@@ -17,7 +17,7 @@ import pygame
 from app import AutoBeatApp, COUNTDOWN_SECONDS
 from chart_generator import ChartGenerator, START_LEAD_IN_SECONDS
 from gameplay import GameSession, JudgmentWindows
-from models import AnalysisResult, Chart, Difficulty, Note
+from models import AnalysisResult, Chart, Difficulty, Judgment, Note, NoteType
 
 
 class CountdownTest(unittest.TestCase):
@@ -75,6 +75,116 @@ class CountdownTest(unittest.TestCase):
         self.app.key_event(pygame.event.Event(pygame.KEYDOWN, {"key": pygame.K_ESCAPE}))
         self.assertEqual(self.app.screen, "select")
         self.app.audio.stop.assert_called_once()
+
+
+    def test_keyup_during_pause_clears_stale_held_lane(self) -> None:
+        self.app.screen = "game"
+        self.app.session = GameSession(Chart(1, "p" * 64, Difficulty.NORMAL, 1, 4.0, notes=[Note(1.0, 0, NoteType.HOLD, 3.0)]), JudgmentWindows())
+        self.app.session.press(0, 1.0)
+        self.assertEqual(self.app.session.held_lanes, {0})
+        self.app.audio = type("Audio", (), {"paused": True})()
+
+        self.app.key_up_event(pygame.event.Event(pygame.KEYUP, {"key": pygame.K_d}))
+
+        self.assertEqual(self.app.session.held_lanes, set())
+        self.assertEqual(self.app.session.result().judgments["MISS"], 0)
+
+    def test_resume_syncs_held_lanes_to_current_keyboard_state(self) -> None:
+        class FakeAudio:
+            paused = True
+            def resume(self) -> None:
+                self.paused = False
+            def pause(self) -> None:
+                self.paused = True
+
+        pressed = [False] * 512
+        pressed[pygame.K_f] = True
+        self.app.screen = "game"
+        self.app.audio = FakeAudio()
+        self.app.session = GameSession(Chart(1, "r" * 64, Difficulty.NORMAL, 1, 4.0, notes=[Note(1.0, 1, NoteType.HOLD, 3.0)]), JudgmentWindows())
+        self.app.session.press(1, 1.0)
+        self.app.session.held_lanes.add(0)
+
+        with patch("pygame.key.get_pressed", return_value=pressed):
+            self.app.toggle_pause()
+
+        self.assertFalse(self.app.audio.paused)
+        self.assertEqual(self.app.session.held_lanes, {1})
+
+    def test_escape_pause_resume_then_lane_key_is_processed(self) -> None:
+        class FakeAudio:
+            paused = False
+            time = 1.0
+
+            def resume(self) -> None:
+                self.paused = False
+
+            def pause(self) -> None:
+                self.paused = True
+
+        self.app.screen = "game"
+        self.app.audio = FakeAudio()
+        self.app.session = GameSession(Chart(1, "e" * 64, Difficulty.NORMAL, 1, 4.0, notes=[Note(1.0, 0)]), JudgmentWindows())
+        pressed = [False] * 512
+
+        self.app.key_event(pygame.event.Event(pygame.KEYDOWN, {"key": pygame.K_ESCAPE}))
+        self.assertTrue(self.app.audio.paused)
+        with patch("pygame.key.get_pressed", return_value=pressed):
+            self.app.key_event(pygame.event.Event(pygame.KEYDOWN, {"key": pygame.K_ESCAPE}))
+        self.app.key_event(pygame.event.Event(pygame.KEYDOWN, {"key": pygame.K_d}))
+
+        self.assertFalse(self.app.audio.paused)
+        self.assertEqual(self.app.session.judgment_counts[Judgment.PERFECT.value], 1)
+
+    def test_lane_held_during_resume_works_after_release_and_repress(self) -> None:
+        class FakeAudio:
+            paused = True
+            time = 1.0
+
+            def resume(self) -> None:
+                self.paused = False
+
+            def pause(self) -> None:
+                self.paused = True
+
+        self.app.screen = "game"
+        self.app.audio = FakeAudio()
+        self.app.session = GameSession(Chart(1, "b" * 64, Difficulty.NORMAL, 1, 4.0, notes=[Note(1.0, 0)]), JudgmentWindows())
+        pressed = [False] * 512
+        pressed[pygame.K_d] = True
+
+        with patch("pygame.key.get_pressed", return_value=pressed):
+            self.app.toggle_pause()
+        self.app.key_event(pygame.event.Event(pygame.KEYDOWN, {"key": pygame.K_d}))
+        self.assertEqual(self.app.session.judgment_counts[Judgment.PERFECT.value], 0)
+
+        self.app.key_up_event(pygame.event.Event(pygame.KEYUP, {"key": pygame.K_d}))
+        self.app.key_event(pygame.event.Event(pygame.KEYDOWN, {"key": pygame.K_d}))
+
+        self.assertEqual(self.app.session.judgment_counts[Judgment.PERFECT.value], 1)
+        self.assertNotIn(0, self.app._resume_blocked_lanes)
+
+    def test_focus_loss_pauses_and_clears_lane_state(self) -> None:
+        class FakeAudio:
+            paused = False
+
+            def resume(self) -> None:
+                self.paused = False
+
+            def pause(self) -> None:
+                self.paused = True
+
+        self.app.screen = "game"
+        self.app.audio = FakeAudio()
+        self.app.session = GameSession(Chart(1, "f" * 64, Difficulty.NORMAL, 1, 4.0, notes=[Note(1.0, 0, NoteType.HOLD, 3.0)]), JudgmentWindows())
+        self.app._lane_keys_down = {0}
+        self.app.session.held_lanes = {0}
+
+        self.app._handle_game_focus_lost()
+
+        self.assertTrue(self.app.audio.paused)
+        self.assertEqual(self.app._lane_keys_down, set())
+        self.assertEqual(self.app.session.held_lanes, set())
 
     def test_generated_charts_reserve_lead_in_after_music_starts(self) -> None:
         analysis = AnalysisResult(

@@ -5,12 +5,13 @@ from collections import Counter
 from dataclasses import dataclass
 from math import ceil
 
-from models import AnalysisResult, Chart, NoteType
+from models import AnalysisResult, Chart, NoteType, chart_lane_count
 
 
 @dataclass(frozen=True, slots=True)
 class ChartSummary:
     difficulty_label: str
+    lane_count: int
     bpm: float
     duration_seconds: float
     total_notes: int
@@ -23,11 +24,17 @@ class ChartSummary:
     first_note_seconds: float | None
     validation_removed: int
     validation_issues: int
+    lane_usage_text: str
+    quality_note: str
     tendency: str
 
     @property
     def notes_per_minute(self) -> int:
         return int(round(self.notes_per_second * 60))
+
+    @property
+    def lane_count_label(self) -> str:
+        return f"{self.lane_count} LANE"
 
     @property
     def first_note_text(self) -> str:
@@ -49,8 +56,12 @@ def build_chart_summary(chart: Chart, analysis: AnalysisResult) -> ChartSummary:
     notes_per_second = len(notes) / duration
     peak = _peak_notes_per_second(notes)
     first_note = min((note.time for note in notes), default=None)
+    lane_count = chart_lane_count(chart)
+    lane_counts = [sum(note.lane == lane for note in notes) for lane in range(lane_count)]
+    used_lanes = sum(count > 0 for count in lane_counts)
     return ChartSummary(
         difficulty_label=chart.difficulty.label,
+        lane_count=lane_count,
         bpm=float(analysis.bpm),
         duration_seconds=float(chart.song_duration),
         total_notes=len(notes),
@@ -63,8 +74,32 @@ def build_chart_summary(chart: Chart, analysis: AnalysisResult) -> ChartSummary:
         first_note_seconds=first_note,
         validation_removed=int(chart.metadata.get("validation_removed", 0)),
         validation_issues=len(chart.metadata.get("validation_issues", [])),
+        lane_usage_text=_lane_usage_text(lane_counts),
+        quality_note=_quality_note(lane_count, used_lanes, notes_per_second, peak, chord_events),
         tendency=_estimate_tendency(notes_per_second, peak, chord_events, hold_notes),
     )
+
+
+def _lane_usage_text(lane_counts: list[int]) -> str:
+    if not lane_counts:
+        return "なし"
+    total = max(1, sum(lane_counts))
+    used = sum(count > 0 for count in lane_counts)
+    peak = max(lane_counts, default=0)
+    peak_ratio = peak / total
+    return f"{used}/{len(lane_counts)} lanes  最大{peak_ratio:.0%}"
+
+
+def _quality_note(lane_count: int, used_lanes: int, notes_per_second: float, peak: int, chord_events: int) -> str:
+    if used_lanes <= max(1, lane_count // 2):
+        return "レーン偏りを確認"
+    if lane_count == 3 and (notes_per_second >= 4.0 or peak >= 6):
+        return "3レーンでは高密度"
+    if lane_count == 7 and chord_events == 0 and notes_per_second >= 3.0:
+        return "単押し中心で広く展開"
+    if peak >= 8:
+        return "瞬間密度に注意"
+    return "バランス良好"
 
 
 def _peak_notes_per_second(notes: list[object]) -> int:

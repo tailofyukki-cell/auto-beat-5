@@ -50,10 +50,12 @@ class ChartSummaryTest(unittest.TestCase):
                 Note(2.0, 1, NoteType.HOLD, 3.0),
                 Note(4.0, 2),
             ],
-            metadata={"validation_removed": 2, "validation_issues": ["same-lane gap"]},
+            metadata={"lane_count": 7, "validation_removed": 2, "validation_issues": ["same-lane gap"]},
         )
         summary = build_chart_summary(chart, analysis)
 
+        self.assertEqual(summary.lane_count, 7)
+        self.assertEqual(summary.lane_count_label, "7 LANE")
         self.assertEqual(summary.total_notes, 4)
         self.assertEqual(summary.tap_notes, 3)
         self.assertEqual(summary.hold_notes, 1)
@@ -62,7 +64,16 @@ class ChartSummaryTest(unittest.TestCase):
         self.assertEqual(summary.peak_notes_per_second, 2)
         self.assertEqual(summary.validation_removed, 2)
         self.assertEqual(summary.validation_issues, 1)
+        self.assertEqual(summary.lane_usage_text, "4/7 lanes  最大25%")
+        self.assertEqual(summary.quality_note, "バランス良好")
         self.assertEqual(summary.first_note_text, "1.20 秒")
+
+    def test_summary_flags_heavy_lane_bias(self) -> None:
+        analysis = fixture_analysis()
+        chart = Chart(1, analysis.music_hash, Difficulty.NORMAL, 1, analysis.duration, notes=[Note(1.2, 0), Note(1.8, 0), Note(2.4, 0)], metadata={"lane_count": 7})
+        summary = build_chart_summary(chart, analysis)
+        self.assertEqual(summary.lane_usage_text, "1/7 lanes  最大100%")
+        self.assertEqual(summary.quality_note, "レーン偏りを確認")
 
 
 class ChartSummaryWorkflowTest(unittest.TestCase):
@@ -84,6 +95,7 @@ class ChartSummaryWorkflowTest(unittest.TestCase):
         self.assertEqual(self.app.screen, "chart_summary")
         self.assertIsNotNone(self.app.chart)
         self.assertIsNone(self.app.session)
+        self.assertEqual(self.app.chart.metadata["gap_balance_version"], 2)
         self.app.draw()
 
     def test_regenerate_keeps_committed_cache_until_candidate_is_adopted(self) -> None:
@@ -91,6 +103,7 @@ class ChartSummaryWorkflowTest(unittest.TestCase):
         first_chart = self.app.chart
         self.assertIsNotNone(first_chart)
         first_variant = int(first_chart.metadata["generation_variant"])
+        self.assertEqual(first_chart.metadata["generation_style"], "standard")
         first_lanes = [note.lane for note in first_chart.notes]
 
         self.app.regenerate_chart()
@@ -98,6 +111,7 @@ class ChartSummaryWorkflowTest(unittest.TestCase):
         self.assertEqual(self.app.screen, "chart_summary")
         self.assertTrue(self.app.chart_is_pending)
         self.assertEqual(int(self.app.chart.metadata["generation_variant"]), first_variant + 1)
+        self.assertEqual(self.app.chart.metadata["generation_style"], "bass")
         self.assertNotEqual([note.lane for note in self.app.chart.notes], first_lanes)
         cached = load_chart(self.app.paths, self.app.analysis.music_hash, Difficulty.EASY.value)
         self.assertIsNotNone(cached)
@@ -113,7 +127,32 @@ class ChartSummaryWorkflowTest(unittest.TestCase):
         adopted = load_chart(self.app.paths, self.app.analysis.music_hash, Difficulty.EASY.value)
         self.assertIsNotNone(adopted)
         self.assertEqual(int(adopted.metadata["generation_variant"]), candidate_variant)
+        self.assertEqual(adopted.metadata["generation_style"], "bass")
+        self.assertEqual(adopted.metadata["gap_balance_version"], 2)
         self.assertFalse(self.app.chart_is_pending)
+
+
+    def test_regenerate_keeps_only_five_recent_candidates_and_switches_between_them(self) -> None:
+        self.app.select_chart(Difficulty.NORMAL)
+        committed = self.app.chart
+        self.assertIsNotNone(committed)
+        for _ in range(7):
+            self.app.regenerate_chart()
+
+        self.assertEqual(len(self.app.chart_candidates), 5)
+        self.assertEqual(self.app.chart_candidate_index, 4)
+        self.assertTrue(self.app.chart_is_pending)
+        self.assertEqual([int(chart.metadata["generation_variant"]) for chart in self.app.chart_candidates], [3, 4, 5, 6, 7])
+
+        self.app.move_chart_candidate(-1)
+        self.assertEqual(self.app.chart_candidate_index, 3)
+        self.assertEqual(int(self.app.chart.metadata["generation_variant"]), 6)
+        self.app.draw()
+
+        self.app.adopt_pending_chart()
+        self.assertFalse(self.app.chart_is_pending)
+        self.assertEqual(len(self.app.chart_candidates), 0)
+        self.assertEqual(int(self.app.chart.metadata["generation_variant"]), 6)
 
     def test_trial_result_allows_explicit_candidate_adoption(self) -> None:
         self.app.select_chart(Difficulty.NORMAL)

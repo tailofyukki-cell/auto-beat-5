@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import sys
 from datetime import UTC, datetime
 from importlib import metadata
@@ -20,7 +21,7 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DIST = ROOT / "build_release" / "AutoBeat5"
-DEFAULT_STAGE = ROOT / "release" / "_staging" / "AutoBeat5"
+DEFAULT_STAGE = ROOT / "release" / "_staging" / "Otoasobi"
 RUNTIME_DISTRIBUTIONS = (
     "pygame",
     "librosa",
@@ -52,6 +53,36 @@ def copy_tree(source: Path, destination: Path) -> None:
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(source, destination)
+
+
+def run_without_console(command: list[str]) -> None:
+    startupinfo = None
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0
+    if sys.platform.startswith("win") and hasattr(subprocess, "STARTUPINFO"):
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+        startupinfo.wShowWindow = 0
+    subprocess.run(
+        command,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        startupinfo=startupinfo,
+        creationflags=creationflags,
+    )
+
+
+def prepare_reward_storage(rewards_dir: Path) -> None:
+    locked = rewards_dir / "locked"
+    unlocked = rewards_dir / "unlocked"
+    locked.mkdir(parents=True, exist_ok=True)
+    unlocked.mkdir(parents=True, exist_ok=True)
+    if sys.platform.startswith("win"):
+        try:
+            run_without_console(["attrib", "+h", str(locked)])
+        except OSError:
+            pass
 
 
 def stage_demo_bundle(destination: Path) -> None:
@@ -104,11 +135,6 @@ def stage_demo_bundle(destination: Path) -> None:
         target_cache.mkdir(parents=True, exist_ok=True)
         shutil.copy2(cache, target_cache / cache.name)
         copy_tree(charts, destination / "charts" / digest)
-
-
-def stage_release_marker(stage_dir: Path) -> None:
-    # This marker isolates a shipped release from the developer's AppData profile.
-    (stage_dir / "RELEASE_CHANNEL.txt").write_text("AutoBeat5_Release_RC1\n", encoding="ascii")
 
 
 def license_candidates(distribution: metadata.Distribution) -> Iterable[Path]:
@@ -273,6 +299,9 @@ def stage_assets(dist_dir: Path, stage_dir: Path) -> None:
         shutil.rmtree(stage_dir)
     stage_dir.parent.mkdir(parents=True, exist_ok=True)
     copy_tree(dist_dir, stage_dir)
+    (stage_dir / "AutoBeat5.exe").rename(stage_dir / "Otoasobi.exe")
+    for internal_file in ("RC1_TEST_CHECKLIST.md", "RELEASE_CHANNEL.txt"):
+        (stage_dir / internal_file).unlink(missing_ok=True)
 
     stage_demo_bundle(stage_dir / "demo_songs")
     for folder in ("rewards", "assets", "licenses"):
@@ -280,18 +309,22 @@ def stage_assets(dist_dir: Path, stage_dir: Path) -> None:
         if not source.is_dir():
             raise RuntimeError(f"Required release asset folder is missing: {source}")
         copy_tree(source, stage_dir / folder)
-    stage_release_marker(stage_dir)
+    prepare_reward_storage(stage_dir / "rewards")
 
-    readme = ROOT / "TRIAL_README.txt"
+    readme = ROOT / "RELEASE_README.txt"
     if not readme.is_file():
         raise RuntimeError(f"Release README is missing: {readme}")
-    shutil.copy2(readme, stage_dir / readme.name)
+    shutil.copy2(readme, stage_dir / "README.txt")
 
-    checklist = ROOT / "docs" / "sales_release_rc1_test_checklist.md"
-    if not checklist.is_file():
-        raise RuntimeError(f"Release test checklist is missing: {checklist}")
-    shutil.copy2(checklist, stage_dir / "RC1_TEST_CHECKLIST.md")
+    user_guide = ROOT / "docs" / "AutoBeat5_User_Guide.pdf"
+    if not user_guide.is_file():
+        tools_dir = Path(__file__).resolve().parent
+        if str(tools_dir) not in sys.path:
+            sys.path.insert(0, str(tools_dir))
+        from build_user_guide_pdf import build_pdf
 
+        user_guide = build_pdf()
+    shutil.copy2(user_guide, stage_dir / "Otoasobi_User_Guide.pdf")
 
 def write_sbom(stage_dir: Path, records: list[dict[str, object]]) -> None:
     native_files = []
@@ -331,3 +364,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from models import Chart, Judgment, Note, NoteType, PlayResult
+from models import Chart, Judgment, Note, NoteType, PlayResult, chart_key
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,12 +177,25 @@ class GameSession:
             + self.judgment_counts[Judgment.GOOD.value] * 0.5
         )
         accuracy = 0.0 if total == 0 else weighted / total * 100
-        rank = "S" if accuracy >= 95 else "A" if accuracy >= 88 else "B" if accuracy >= 75 else "C" if accuracy >= 60 else "D"
+        misses = self.judgment_counts[Judgment.MISS.value]
+        rank = (
+            "S+"
+            if accuracy >= 98 and misses == 0
+            else "S"
+            if accuracy >= 95
+            else "A"
+            if accuracy >= 90
+            else "B"
+            if accuracy >= 80
+            else "C"
+            if accuracy >= 70
+            else "D"
+        )
         return PlayResult(
             score=self.score,
             max_combo=self.max_combo,
             judgments=dict(self.judgment_counts),
             accuracy=round(accuracy, 2),
             rank=rank,
-            chart_hash=f"{self.chart.music_hash}:{self.chart.difficulty.value}",
+            chart_hash=chart_key(self.chart),
         )

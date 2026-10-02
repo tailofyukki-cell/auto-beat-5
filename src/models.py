@@ -43,8 +43,8 @@ class Note:
     id: str = ""
 
     def __post_init__(self) -> None:
-        if self.lane not in range(5):
-            raise ValueError(f"lane must be 0..4, got {self.lane}")
+        if self.lane not in range(7):
+            raise ValueError(f"lane must be 0..6, got {self.lane}")
         if self.time < 0:
             raise ValueError("note time must be non-negative")
         if self.kind is NoteType.HOLD:
@@ -156,7 +156,31 @@ class PlayResult:
         return asdict(self)
 
 
-LANE_NAMES = ("D", "F", "SPACE", "J", "K")
 DEFAULT_KEYS = ("d", "f", "space", "j", "k")
+LANE_KEY_PRESETS: dict[int, tuple[str, ...]] = {
+    3: ("d", "space", "k"),
+    5: DEFAULT_KEYS,
+    7: ("s", "d", "f", "space", "j", "k", "l"),
+}
+LANE_NAMES_BY_COUNT: dict[int, tuple[str, ...]] = {count: tuple(key.upper() for key in keys) for count, keys in LANE_KEY_PRESETS.items()}
+LANE_NAMES = LANE_NAMES_BY_COUNT[5]
+
+
+def normalize_lane_count(value: Any = 5) -> int:
+    try:
+        lane_count = int(value)
+    except (TypeError, ValueError):
+        return 5
+    return lane_count if lane_count in LANE_KEY_PRESETS else 5
+
+
+def chart_lane_count(chart: Chart) -> int:
+    return normalize_lane_count(chart.metadata.get("lane_count", 5))
+
+
+def chart_key(chart: Chart) -> str:
+    return f"{chart.music_hash}:{chart.difficulty.value}:{chart_lane_count(chart)}lane"
+
+
 DIFFICULTY_ORDER = tuple(Difficulty)
 """譜面と画面の表示順。Difficultyの宣言順を5段階の難易度順とする。"""
