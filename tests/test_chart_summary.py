@@ -89,6 +89,38 @@ class ChartSummaryWorkflowTest(unittest.TestCase):
         pygame.quit()
         self.directory.cleanup()
 
+    def test_mode_selection_cancel_generate_compare_and_adopt(self) -> None:
+        self.app.select_chart(Difficulty.EASY)
+        committed = self.app.chart
+        self.app.key_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_r))
+        self.assertEqual(self.app.screen, "regeneration_modes")
+        self.app.key_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_DOWN))
+        self.assertEqual(self.app.regeneration_mode, "frequency")
+        self.app.draw()
+        for rect, _ in self.app.buttons:
+            self.assertTrue(self.app.surface.get_rect().contains(rect))
+        self.app.key_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE))
+        self.assertIs(self.app.chart, committed)
+        self.assertFalse(self.app.chart_candidates)
+        self.app.open_regeneration_modes()
+        self.app.key_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN))
+        frequency = self.app.chart
+        self.assertTrue(self.app.chart_is_pending)
+        self.assertEqual(frequency.metadata['generation_style'], 'frequency')
+        self.assertNotIn('gap_balance_version', frequency.metadata)
+        cached = load_chart(self.app.paths, self.app.analysis.music_hash, Difficulty.EASY.value)
+        self.assertEqual(cached.to_dict(), committed.to_dict())
+        self.app.regeneration_mode = "balanced"
+        self.app.regenerate_chart()
+        self.assertIn('gap_balance_version', self.app.chart.metadata)
+        self.app.move_chart_candidate(-1)
+        self.assertIs(self.app.chart, frequency)
+        self.app.adopt_pending_chart()
+        cached = load_chart(self.app.paths, self.app.analysis.music_hash, Difficulty.EASY.value)
+        self.assertEqual(cached.metadata['generation_style'], 'frequency')
+        self.app.select_chart(Difficulty.EASY)
+        self.assertEqual(self.app.chart.to_dict(), cached.to_dict())
+
     def test_select_chart_opens_summary_without_starting_game(self) -> None:
         self.app.select_chart(Difficulty.EASY)
 

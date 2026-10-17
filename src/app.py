@@ -22,6 +22,8 @@ from chart_summary import build_chart_summary
 from chart_validator import ChartValidator
 from chart_balance import balance_chart
 from gameplay import GameSession, JudgmentWindows
+from gamepad import Gamepad
+from result_progress import comparison_lines, next_rank_goal
 from mascots import Mascot, find_mascot, load_mascot_catalog
 from mascot_dialogue import mascot_result_line
 from title_scene import TitleScene
@@ -338,6 +340,7 @@ class AutoBeatApp:
         self.pending_chart: Chart | None = None
         self.chart_candidates: list[Chart] = []
         self.chart_candidate_index = -1
+        self.regeneration_mode = "balanced"
         self.worker: AnalysisWorker | None = None
         self.progress = AnalysisProgress(0, "")
         self.selected_difficulty = 0
@@ -380,6 +383,9 @@ class AutoBeatApp:
         self.hit_effects: list[HitEffect] = []
         self.judgment_feedback: JudgmentFeedback | None = None
         self.judgment_log: list[JudgmentLogEntry] = []
+        self.gamepad = Gamepad(self.settings)
+        self.pad_capture = None
+        self._keyboard_lanes: set[int] = set()
         self._lane_keys_down: set[int] = set()
         self._resume_blocked_lanes: set[int] = set()
         self.countdown_started_at: float | None = None
@@ -2333,16 +2339,19 @@ class AutoBeatApp:
                 self.screen = "difficulty"
                 return
 
-    def _generate_chart(self, difficulty: Difficulty, *, variant: int, persist: bool = True) -> Chart:
+    def _generate_chart(self, difficulty: Difficulty, *, variant: int, persist: bool = True, mode: str = "balanced") -> Chart:
         """解析済み楽曲から指定variantの譜面を生成する。試作候補は明示採用まで保存しない。"""
         if not self.analysis:
             raise RuntimeError("解析結果がありません。")
-        style = ChartGenerator.candidate_style(self.analysis, variant)
+        if mode not in {"balanced", "frequency"}:
+            raise ValueError(f"unknown generation mode: {mode}")
+        style = "frequency" if mode == "frequency" else ChartGenerator.candidate_style(self.analysis, variant)
         chart = ChartGenerator().generate(self.analysis, difficulty, variant=variant, lane_count=self.active_lane_count, style=style)
         report = ChartValidator().validate(chart)
         chart.metadata["validation_removed"] = report.removed_notes
         chart.metadata["validation_issues"] = report.issues[:20]
-        balance_chart(chart, self.analysis)
+        if mode == "balanced":
+            balance_chart(chart, self.analysis)
         if persist:
             save_chart(self.paths, chart)
         return chart
@@ -2394,6 +2403,31 @@ class AutoBeatApp:
         self.pending_chart = self.chart_candidates[self.chart_candidate_index]
         self.chart = self.pending_chart
 
+    def open_regeneration_modes(self) -> None:
+        self.set_screen("regeneration_modes")
+        self.message = ""
+
+    def draw_regeneration_modes(self) -> None:
+        width, height = self.size
+        self.heading("再生成モード", "↑↓で選択 / ENTERで候補を生成 / ESCで戻る")
+        modes = (
+            ("balanced", "バランス重視（従来）", "レーンの偏り・連打・空白区間を調整。候補ごとに標準／低音／リズムの傾向を変更。"),
+            ("frequency", "音域重視（バランス補正なし）", "帯域の強さで配置。低音は左、高音は右。レーンの偏りや同じレーンの繰り返しを維持。"),
+        )
+        for index, (mode, label, description) in enumerate(modes):
+            y = 190 + index * 140
+            selected = self.regeneration_mode == mode
+            self.button(("● " if selected else "○ ") + label,
+                        pygame.Rect(width // 2 - 430, y, 860, 52),
+                        lambda value=mode: setattr(self, "regeneration_mode", value),
+                        accent=GREEN if selected else MUTED)
+            self.text(description, "small", WHITE, center=(width // 2, y + 80))
+        self.text("音域重視は音名の採譜ではなく、高音・低音の帯域エネルギーを使います。", "small", MUTED, center=(width // 2, 500))
+        self.text("同じ解析・難易度・レーン数なら同じ配置になります。難易度の密度制限と安全補正は共通です。", "small", MUTED, center=(width // 2, 530))
+        self.text("生成後は候補を比較でき、採用・保存するまで確定譜面は変わりません。", "small", CYAN, center=(width // 2, 560))
+        self.button("このモードで生成 [ENTER]", pygame.Rect(width // 2 - 210, height - 110, 420, 48), self.regenerate_chart, accent=GREEN)
+        self.button("戻る [ESC]", pygame.Rect(45, height - 65, 170, 40), lambda: self.set_screen("chart_summary"), accent=MUTED)
+
     def regenerate_chart(self) -> None:
         """確定済み譜面を残したまま、直近5件まで未保存候補を保持して生成する。"""
         if not self.analysis or not self.chart:
@@ -2402,7 +2436,7 @@ class AutoBeatApp:
             return
         base_chart = self.committed_chart or self.pending_chart or self.chart
         next_variant = max(self._candidate_variant_numbers() or [int(base_chart.metadata.get("generation_variant", 0))]) + 1
-        candidate = self._generate_chart(base_chart.difficulty, variant=next_variant, persist=False)
+        candidate = self._generate_chart(base_chart.difficulty, variant=next_variant, persist=False, mode=self.regeneration_mode)
         self.chart_candidates.append(candidate)
         if len(self.chart_candidates) > CHART_CANDIDATE_LIMIT:
             self.chart_candidates = self.chart_candidates[-CHART_CANDIDATE_LIMIT:]
@@ -2793,9 +2827,12 @@ class AutoBeatApp:
                 continue
             if key_code < len(pressed) and pressed[key_code]:
                 active.add(active_lane)
-        return active
+        self._keyboard_lanes = set(active)
+        self.gamepad.snapshot()
+        return active | self.gamepad.lanes(self.active_lane_count)
 
     def _reset_lane_input_state(self, *, clear_session: bool = True) -> None:
+        self._keyboard_lanes.clear()
         self._lane_keys_down.clear()
         self._resume_blocked_lanes.clear()
         if clear_session and self.session:
@@ -3596,7 +3633,7 @@ class AutoBeatApp:
             self.text(value, "small", WHITE, pos=(right_panel.left + 170, y))
         self.button("お試しプレイ", pygame.Rect(width // 2 - 530, height - 122, 210, 50), self.start_trial_game, accent=CYAN)
         self.button("この候補でプレイ  [ENTER]" if self.chart_is_pending else "この譜面でプレイ  [ENTER]", pygame.Rect(width // 2 - 300, height - 122, 250, 50), self.start_game, accent=GREEN)
-        self.button("新しい候補  [R]", pygame.Rect(width // 2 - 30, height - 122, 220, 50), self.regenerate_chart, accent=YELLOW)
+        self.button("モード選択・再生成 [R]", pygame.Rect(width // 2 - 30, height - 122, 220, 50), self.open_regeneration_modes, accent=YELLOW)
         if self.chart_candidates:
             self.button("← 前候補", pygame.Rect(width // 2 + 210, height - 122, 150, 50), lambda: self.move_chart_candidate(-1), accent=CYAN)
             self.button("次候補 →", pygame.Rect(width // 2 + 380, height - 122, 150, 50), lambda: self.move_chart_candidate(1), accent=CYAN)
@@ -3919,9 +3956,11 @@ class AutoBeatApp:
                 self.surface.blit(preview, preview.get_rect(center=(rect.centerx, rect.centery + 18)))
             self.text(Path(reward.name).stem, "small", WHITE, center=(rect.centerx, rect.bottom - 18))
             return
-        status = self.draw_reward_progress(pygame.Rect(rect.left + 14, rect.top + 42, rect.width - 28, 72), compact=True)
-        if status.next_reward is not None:
-            self.text("次の画像まであと少し", "small", MUTED, center=(rect.centerx, rect.bottom - 28))
+        status = self.reward_status()
+        self.text(f"BEAT POINT {int(self.profile.get('wallet_score', 0)):,} BP", "small", WHITE,
+                  pos=(rect.left + 14, rect.top + 42))
+        self.text(f"ご褒美画像 {status.unlocked_count} / {status.reward_count} 所有", "small", MUTED,
+                  pos=(rect.left + 14, rect.top + 70))
 
     def save_result_screenshot(self) -> None:
         if not self.session:
@@ -3959,23 +3998,25 @@ class AutoBeatApp:
         self.text(f"ACCURACY {result.accuracy:.2f}%", "body", CYAN, center=(hero.centerx, hero.top + 204))
         self.text(f"MAX COMBO {result.max_combo}", "body", YELLOW, center=(hero.centerx, hero.top + 240))
 
-        y = hero.top + 286
+        y = hero.top + 268
         for label, color in self._result_flags(result)[:4]:
-            self.panel(pygame.Rect(hero.left + 38, y, hero.width - 76, 34), (26, 42, 68), 8)
-            self.text(label, "body", color, center=(hero.centerx, y + 17))
-            y += 42
-        badges = self._result_badges()[:3]
-        if badges:
-            self.text("TITLE", "small", MUTED, center=(hero.centerx, hero.bottom - 68))
-            self.text(" / ".join(badges), "small", WHITE, center=(hero.centerx, hero.bottom - 42))
+            self.text(label, "small", color, center=(hero.centerx, y))
+            y += 20
+        badges = " / ".join(self._result_badges()[:3])
+        for line in self._wrap_result_dialogue(badges, hero.width - 40, 1):
+            self.text(line, "small", MUTED, center=(hero.centerx, hero.bottom - 70))
+        last = self.profile.get("last_play_ranking", {})
+        for index, line in enumerate(comparison_lines(last, result.chart_hash, result.score, result.accuracy,
+                                                     int(result.judgments.get("MISS", 0)))):
+            self.text(line, "small", CYAN, pos=(hero.left + 20, hero.bottom - 48 + index * 21))
 
-        stats = pygame.Rect(520, 118, 350, 300)
+        stats = pygame.Rect(520, 118, 350, 248)
         self.panel(stats, PANEL, 14)
         labels = ("PERFECT", "GREAT", "GOOD", "MISS")
         max_count = max(1, *(int(result.judgments.get(label, 0)) for label in labels))
         for index, label in enumerate(labels):
             count = int(result.judgments.get(label, 0))
-            row_y = stats.top + 32 + index * 62
+            row_y = stats.top + 22 + index * 54
             color = JUDGMENT_COLORS[Judgment(label)]
             self.text(label, "small", color, pos=(stats.left + 24, row_y))
             self.text(str(count), "mono", WHITE, pos=(stats.right - 74, row_y - 2))
@@ -3983,7 +4024,18 @@ class AutoBeatApp:
             pygame.draw.rect(self.surface, (45, 60, 88), bar, border_radius=5)
             pygame.draw.rect(self.surface, color, pygame.Rect(bar.left, bar.top, max(4, int(bar.width * count / max_count)), bar.height), border_radius=5)
 
-        self._draw_result_reward_preview(pygame.Rect(520, 440, 350, 112))
+        self._draw_result_reward_preview(pygame.Rect(520, 380, 350, 112))
+        goal = next_rank_goal(result.accuracy, int(result.judgments.get("MISS", 0)))
+        self.text(goal, "small", GREEN, pos=(520, 501))
+        targets = sorted((item for item in self.shop_items() if not item.owned and item.available),
+                         key=lambda item: (item.price, item.item_id))
+        if targets:
+            item = targets[0]
+            remaining = max(0, item.price - int(self.profile.get("wallet_score", 0)))
+            name = self._wrap_result_dialogue(item.name, 160, 1)[0]
+            target = f"{name}: あと {remaining:,} BP" if remaining else f"{name}: ショップで購入可能！"
+            for index, line in enumerate(self._wrap_result_dialogue(target, 350, 2)):
+                self.text(line, "small", YELLOW, pos=(520, 524 + index * 19))
         mascot_rect = pygame.Rect(900, 118, 300, 420)
         if self._is_full_combo_result(result):
             self._draw_full_combo_media(mascot_rect, result)
@@ -4571,6 +4623,75 @@ class AutoBeatApp:
                 self.text(hint, "small", YELLOW, center=(width // 2, 604))
             self.button("設定を保存", pygame.Rect(width // 2 - 175, 625, 350, 38), self.persist_settings, accent=GREEN)
         self.button("タイトルへ", pygame.Rect(45, height - 65, 150, 40), lambda: self.set_screen("title"), accent=MUTED)
+        self.button("コントローラー設定", pygame.Rect(width - 255, height - 65, 210, 40), lambda: self.set_screen("gamepad"))
+
+    def draw_gamepad(self) -> None:
+        width, height = self.size
+        self.heading("CONTROLLER", "各項目をクリックしてボタンか十字キーを押す / ESCで取消・戻る")
+        names = ", ".join(device.get_name() for device in self.gamepad.devices.values()) or "未接続"
+        self.text(self._playlist_label(names, "small", width - 100), "small", center=(width // 2, 165))
+        labels = [f"レーン {i + 1}" for i in range(self.active_lane_count)] + ["ポーズ / 再開"]
+        for index, (label, token) in enumerate(zip(labels, self.gamepad.bindings(self.active_lane_count))):
+            value = "入力待ち…" if self.pad_capture == index else token
+            self.button(f"{label}: {value}", pygame.Rect(width // 2 - 210, 195 + index * 38, 420, 32),
+                        lambda i=index: setattr(self, "pad_capture", i))
+        self.text("割り当てはレーン数別に自動保存。Bはボタン番号（0始まり）、Hは十字キー。", "small", center=(width // 2, height - 110))
+        self.text("B0: 決定 / B1: 戻る / 十字キー: 選択。スティック・トリガーは未対応。", "small", center=(width // 2, height - 86))
+        self.button("設定へ戻る", pygame.Rect(45, height - 65, 180, 40), lambda: self.set_screen("settings"))
+
+    def gamepad_event(self, event: pygame.event.Event) -> None:
+        if event.type == pygame.JOYDEVICEADDED:
+            self.gamepad.add(event.device_index)
+            return
+        if event.type == pygame.JOYDEVICEREMOVED:
+            device = self.gamepad.devices.pop(event.instance_id, None)
+            if device is not None:
+                self.gamepad.down = {source for source in self.gamepad.down if source[0] != event.instance_id}
+                self._handle_game_focus_lost()
+                device.quit()
+                self.message = "コントローラーが切断されました。接続を確認してください。"
+            return
+        edges = self.gamepad.edges(event)
+        if not getattr(self, "_cursor_window_focused", True):
+            return
+        bindings = self.gamepad.bindings(self.active_lane_count)
+        for token, pressed in edges:
+            if self.screen == "gamepad":
+                if pressed and self.pad_capture is not None:
+                    if token in bindings and bindings.index(token) != self.pad_capture:
+                        self.error = "この入力は別の項目に割り当て済みです。"
+                    else:
+                        bindings[self.pad_capture] = token
+                        if not isinstance(self.settings.get("gamepad_bindings"), dict):
+                            self.settings["gamepad_bindings"] = {}
+                        self.settings["gamepad_bindings"][str(self.active_lane_count)] = bindings
+                        self.pad_capture = None
+                        self.error = ""
+                        self.persist_settings()
+                    return
+                continue
+            if self.screen != "game":
+                menu_keys = {"B0": pygame.K_RETURN, "B1": pygame.K_ESCAPE,
+                             "H0U": pygame.K_UP, "H0D": pygame.K_DOWN,
+                             "H0L": pygame.K_LEFT, "H0R": pygame.K_RIGHT}
+                if pressed and token in menu_keys:
+                    self.key_event(pygame.event.Event(pygame.KEYDOWN, key=menu_keys[token]))
+                continue
+            if not self.session:
+                continue
+            if token == bindings[-1]:
+                if pressed:
+                    self.key_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE))
+            elif token in bindings[:-1]:
+                lane = bindings.index(token)
+                # A tagged event enters the same judgment path without impersonating a physical keyboard key.
+                translated = pygame.event.Event(pygame.KEYDOWN if pressed else pygame.KEYUP,
+                                                key=pygame.K_UNKNOWN, pad_lane=lane)
+                if pressed:
+                    self.key_event(translated)
+                else:
+                    self.key_up_event(translated)
+
     def draw_calibration(self) -> None:
         width, height = self.size
         calibration = self.calibration
@@ -4746,6 +4867,7 @@ class AutoBeatApp:
         self.screen = screen
         self.error = ""
         self.key_capture_lane = None
+        self.pad_capture = None
 
     def draw_overlay(self) -> None:
         width, _ = self.size
@@ -4787,6 +4909,7 @@ class AutoBeatApp:
             "analyzing": self.draw_analyzing,
             "difficulty": self.draw_difficulty,
             "chart_summary": self.draw_chart_summary,
+            "regeneration_modes": self.draw_regeneration_modes,
             "practice_setup": self.draw_practice_setup,
             "practice_result": self.draw_practice_result,
             "trial_result": self.draw_trial_result,
@@ -4799,6 +4922,7 @@ class AutoBeatApp:
             "reward_manager": self.draw_reward_manager,
             "gallery_preview": self.draw_gallery_preview,
             "settings": self.draw_settings,
+            "gamepad": self.draw_gamepad,
             "calibration": self.draw_calibration,
         }[self.screen]()
         if self.screen not in {"title", "game", "calibration"}:
@@ -4811,10 +4935,27 @@ class AutoBeatApp:
         game_lane: int | None = None
         lane_was_down = False
         if self.screen == "game" and self.session:
-            game_lane = self._lane_from_key_name(key)
+            game_lane = getattr(event, "pad_lane", self._lane_from_key_name(key))
             if game_lane is not None:
+                if not hasattr(event, "pad_lane"):
+                    self._keyboard_lanes.add(game_lane)
                 lane_was_down = game_lane in self._lane_keys_down
                 self._lane_keys_down.add(game_lane)
+        if self.screen == "regeneration_modes":
+            if event.key in (pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT):
+                self.regeneration_mode = "frequency" if self.regeneration_mode == "balanced" else "balanced"
+            elif event.key == pygame.K_RETURN:
+                self.regenerate_chart()
+            elif event.key == pygame.K_ESCAPE:
+                self.set_screen("chart_summary")
+            return
+        if self.screen == "gamepad":
+            if event.key == pygame.K_ESCAPE:
+                if self.pad_capture is not None:
+                    self.pad_capture = None
+                else:
+                    self.set_screen("settings")
+            return
         if self.key_capture_lane is not None:
             active_keys = self.active_lane_keys
             if key in active_keys:
@@ -4944,7 +5085,7 @@ class AutoBeatApp:
             if event.key in (pygame.K_RETURN, pygame.K_SPACE):
                 self.start_game()
             elif event.key == pygame.K_r:
-                self.regenerate_chart()
+                self.open_regeneration_modes()
             elif event.key == pygame.K_LEFT and self.chart_candidates:
                 self.move_chart_candidate(-1)
             elif event.key == pygame.K_RIGHT and self.chart_candidates:
@@ -5103,8 +5244,12 @@ class AutoBeatApp:
         if self.screen != "game" or not self.session:
             return
         key = pygame.key.name(event.key).lower()
-        lane = self._lane_from_key_name(key)
+        lane = getattr(event, "pad_lane", self._lane_from_key_name(key))
         if lane is None:
+            return
+        if not hasattr(event, "pad_lane"):
+            self._keyboard_lanes.discard(lane)
+        if lane in self._keyboard_lanes or lane in self.gamepad.lanes(self.active_lane_count):
             return
         self._lane_keys_down.discard(lane)
         if lane in self._resume_blocked_lanes:
@@ -5112,7 +5257,7 @@ class AutoBeatApp:
             for source_lane in self.active_to_source_lanes(lane):
                 self.session.held_lanes.discard(source_lane)
             return
-        if self.game_paused:
+        if self.game_paused or self.countdown_active:
             for source_lane in self.active_to_source_lanes(lane):
                 self.session.held_lanes.discard(source_lane)
             return
@@ -5172,6 +5317,8 @@ class AutoBeatApp:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
+                elif event.type in (pygame.JOYDEVICEADDED, pygame.JOYDEVICEREMOVED, pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP, pygame.JOYHATMOTION):
+                    self.gamepad_event(event)
                 elif event.type == pygame.WINDOWFOCUSLOST:
                     self._cursor_window_focused = False
                     self._handle_game_focus_lost()

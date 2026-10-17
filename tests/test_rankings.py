@@ -52,6 +52,22 @@ class RankingPersistenceTest(unittest.TestCase):
         self.assertEqual(self.profile["last_play_ranking"]["score_delta"], 0)
         self.assertIn("ステージ支配者", self.profile["last_play_badges"])
 
+    def test_comparison_uses_best_before_current_play_not_last_play(self) -> None:
+        for score, accuracy in ((10000, 92), (5000, 80), (12000, 95)):
+            record_play(self.paths, self.profile, chart_key=self.chart_key, result=result(score, accuracy, 10))
+        previous = self.profile["last_play_ranking"]["previous_best"]
+        self.assertEqual(previous["score"], 10000)
+        self.assertEqual(previous["accuracy"], 92)
+        self.assertEqual(previous["miss_count"], 0)
+        self.assertEqual(load_profile(self.paths)["last_play_ranking"]["previous_best"], previous)
+
+    def test_legacy_five_lane_best_is_preserved_after_new_play(self) -> None:
+        record_play(self.paths, self.profile, chart_key=self.chart_key, result=result(10000, 92, 10))
+        key = self.chart_key + ":5lane"
+        record_play(self.paths, self.profile, chart_key=key, result=result(5000, 80, 5))
+        self.assertEqual(self.profile["last_play_ranking"]["score_delta"], -5000)
+        self.assertEqual(ranking_entries(self.profile, key)[0]["score"], 10000)
+
 
     def test_record_play_saves_shareable_result_badges(self) -> None:
         perfect_result = result(50000, 100.0, 500, "S+")

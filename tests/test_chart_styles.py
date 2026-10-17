@@ -21,6 +21,52 @@ class ChartStyleTests(unittest.TestCase):
         analysis.sustained_segments = []
         return analysis
 
+    def test_frequency_keeps_dominant_band_despite_percussion_and_variant(self):
+        analysis = self.analysis()
+        analysis.percussive_strengths = [1.0] * len(analysis.onsets)
+        analysis.downbeats = list(analysis.onsets)
+        for count in (3, 5, 7):
+            for band in range(5):
+                analysis.band_energy = [[1.0 if i == band else 0.0 for i in range(5)]] * len(analysis.onsets)
+                charts = [ChartGenerator().generate(analysis, Difficulty.EXPERT, lane_count=count,
+                          variant=variant, style="frequency") for variant in (0, 1, 2)]
+                expected = ChartGenerator._source_band_to_lane(band, count)
+                self.assertTrue(charts[0].notes)
+                self.assertEqual({n.lane for n in charts[0].notes}, {expected})
+                signature = lambda c: [(n.time, n.lane, n.kind, n.end_time) for n in c.notes]
+                self.assertEqual(signature(charts[0]), signature(charts[1]))
+                self.assertEqual(signature(charts[0]), signature(charts[2]))
+
+    def test_frequency_does_not_use_percussion_to_select_events_or_fill_gaps(self):
+        from chart_balance import balance_chart
+        analysis = self.analysis()
+        analysis.onset_strengths = [0.2, 0.8, 0.4] * 20
+        first = ChartGenerator().generate(analysis, Difficulty.NORMAL, style="frequency")
+        analysis.percussive_strengths = [0.0, 1.0, 0.9] * 20
+        second = ChartGenerator().generate(analysis, Difficulty.NORMAL, style="frequency")
+        self.assertEqual(first.to_dict(), second.to_dict())
+        before = first.to_dict()
+        self.assertEqual(balance_chart(first, analysis), 0)
+        self.assertEqual(before, first.to_dict())
+        self.assertEqual(first.metadata['lane_balance'], 'none')
+
+    def test_frequency_without_band_energy_does_not_invent_taps(self):
+        analysis = self.analysis()
+        analysis.band_energy = []
+        chart = ChartGenerator().generate(analysis, Difficulty.EXPERT, style="frequency")
+        self.assertEqual(chart.notes, [])
+
+    def test_frequency_chord_thinning_keeps_strongest_high_band(self):
+        analysis = self.analysis()
+        analysis.band_energy = [[0.6, 0, 0, 0, 1.0]] * len(analysis.onsets)
+        chart = ChartGenerator().generate(analysis, Difficulty.NORMAL, style="frequency")
+        groups = {}
+        for note in chart.notes:
+            groups.setdefault(note.time, []).append(note)
+        singles = [notes[0] for notes in groups.values() if len(notes) == 1]
+        self.assertTrue(singles)
+        self.assertEqual({note.lane for note in singles}, {4})
+
     def test_initial_standard_and_repeated_style_rotation(self):
         analysis = self.analysis()
         self.assertEqual([ChartGenerator.candidate_style(analysis, i) for i in range(7)],
@@ -48,7 +94,7 @@ class ChartStyleTests(unittest.TestCase):
         generator = ChartGenerator()
         for lanes in (3, 5, 7):
             for difficulty in Difficulty:
-                for style in ("standard", "bass", "rhythm"):
+                for style in ("standard", "bass", "rhythm", "frequency"):
                     with self.subTest(lanes=lanes, difficulty=difficulty, style=style):
                         chart = generator.generate(fixture_analysis(), difficulty, lane_count=lanes, style=style)
                         ChartValidator().validate(chart)

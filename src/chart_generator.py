@@ -28,7 +28,7 @@ class DifficultyRule:
 # ノーツが画面上端から判定線へ届く時間より少し長く確保する。
 # カウントダウン後に音源が始まっても、最初の入力を準備できる。
 START_LEAD_IN_SECONDS = 1.20
-CHART_STYLE_LABELS = {"standard": "標準", "bass": "低音重視", "rhythm": "リズム重視"}
+CHART_STYLE_LABELS = {"standard": "標準", "bass": "低音重視", "rhythm": "リズム重視", "frequency": "音域重視"}
 
 RULES: dict[Difficulty, DifficultyRule] = {
     Difficulty.BEGINNER: DifficultyRule(80, 0.48, False, 1, 0.00, False, 0.00, 0.00, False, 2.0),
@@ -103,7 +103,8 @@ class ChartGenerator:
         style_targets: dict[float, int] = {}
         seed = int(hashlib.sha256(f"{analysis.music_hash}:{difficulty.value}:{lane_count}:{variant}".encode()).hexdigest()[:16], 16)
         notes: list[Note] = []
-        candidates = self._select_candidates(analysis, rule)
+        frequency_only = style == "frequency"
+        candidates = self._select_candidates(analysis, rule, frequency_only=frequency_only)
         last_by_lane = [-inf] * lane_count
         previous_lane = lane_count // 2
 
@@ -117,23 +118,28 @@ class ChartGenerator:
             strength = self._at(analysis.onset_strengths, index, 0.0)
             percussion = self._at(analysis.percussive_strengths, index, 0.0)
             downbeat = self._near_downbeat(time, analysis.downbeats)
-            lanes = self._assign_lanes(bands, strength, percussion, previous_lane, rule, downbeat, variant, lane_count)
+            lanes = (self._frequency_lanes(bands, rule, lane_count) if frequency_only else
+                     self._assign_lanes(bands, strength, percussion, previous_lane, rule, downbeat, variant, lane_count))
             lanes = [lane for lane in lanes if time - last_by_lane[lane] >= rule.min_gap]
             if not lanes:
                 continue
             for lane in lanes:
-                source = "downbeat" if downbeat and lane == lane_count // 2 else "onset"
-                notes.append(Note(time=time, lane=lane, source=source, strength=strength))
+                source = "frequency" if frequency_only else ("downbeat" if downbeat and lane == lane_count // 2 else "onset")
+                note_strength = (max(bands[band] for band in range(5)
+                                     if self._source_band_to_lane(band, lane_count) == lane)
+                                 if frequency_only else strength)
+                notes.append(Note(time=time, lane=lane, source=source, strength=note_strength))
                 last_by_lane[lane] = time
                 previous_lane = lane
 
-        if rule.allow_dense_patterns:
+        if rule.allow_dense_patterns and not frequency_only:
             self._shape_roll_patterns(notes, analysis, difficulty, lane_count)
         if rule.allow_holds:
             self._add_holds(notes, analysis, rule, lane_count)
         notes = self._cap_chord_frequency(notes, rule.max_chord_ratio)
         notes = self._cap_density(notes, analysis.duration, rule.max_notes_per_second)
-        self._spread_lane_load(notes, rule, lane_count, style_targets=style_targets)
+        if not frequency_only:
+            self._spread_lane_load(notes, rule, lane_count, style_targets=style_targets)
         # sustain候補はonset候補とは別経路で加わるため、最後に先頭の助走時間を統一する。
         notes = [note for note in notes if note.time >= START_LEAD_IN_SECONDS]
         chart = Chart(
@@ -157,7 +163,8 @@ class ChartGenerator:
                 "generation_style_version": 1,
                 "lane_count": lane_count,
                 "lane_mode": f"{lane_count}lane",
-                "lane_balance": "windowed-load-v2",
+                "lane_balance": "none" if frequency_only else "windowed-load-v2",
+                "generation_mode": "frequency" if frequency_only else "balanced",
                 "lane_tuning": "lane-count-v1",
             },
         )
@@ -175,7 +182,7 @@ class ChartGenerator:
             return (result + [0.0] * 5)[:5]
         return [0.0] * 5
 
-    def _select_candidates(self, analysis: AnalysisResult, rule: DifficultyRule) -> list[int]:
+    def _select_candidates(self, analysis: AnalysisResult, rule: DifficultyRule, *, frequency_only: bool = False) -> list[int]:
         if not analysis.onsets:
             return []
         strengths = np.asarray(analysis.onset_strengths or [0.0] * len(analysis.onsets), dtype=float)
@@ -184,16 +191,16 @@ class ChartGenerator:
         percussion = np.asarray(analysis.percussive_strengths or [0.0] * len(analysis.onsets), dtype=float)
         if len(percussion) < len(analysis.onsets):
             percussion = np.pad(percussion, (0, len(analysis.onsets) - len(percussion)))
-        combined = strengths[: len(analysis.onsets)] * 0.70 + percussion[: len(analysis.onsets)] * 0.30
+        combined = strengths[: len(analysis.onsets)] if frequency_only else strengths[: len(analysis.onsets)] * 0.70 + percussion[: len(analysis.onsets)] * 0.30
         threshold = float(np.percentile(combined, rule.strength_percentile))
         chosen = [index for index, value in enumerate(combined) if value >= threshold]
         # 初級は拍と小節頭の骨格を必ず残し、上級は音の細部を段階的に追加する。
-        if rule is RULES[Difficulty.BEGINNER] and analysis.beats:
+        if not frequency_only and rule is RULES[Difficulty.BEGINNER] and analysis.beats:
             for beat in analysis.beats[::2]:
                 nearest = min(range(len(analysis.onsets)), key=lambda i: abs(analysis.onsets[i] - beat))
                 if abs(analysis.onsets[nearest] - beat) < 0.13:
                     chosen.append(nearest)
-        for downbeat in analysis.downbeats:
+        for downbeat in ([] if frequency_only else analysis.downbeats):
             nearest = min(range(len(analysis.onsets)), key=lambda i: abs(analysis.onsets[i] - downbeat))
             if abs(analysis.onsets[nearest] - downbeat) < 0.11:
                 chosen.append(nearest)
@@ -225,6 +232,23 @@ class ChartGenerator:
     @staticmethod
     def _near_downbeat(time: float, downbeats: list[float]) -> bool:
         return any(abs(time - downbeat) <= 0.085 for downbeat in downbeats)
+
+    @classmethod
+    def _frequency_lanes(cls, bands: list[float], rule: DifficultyRule, lane_count: int) -> list[int]:
+        """Map strong frequency bands directly, without load, rhythm or variant overrides."""
+        ranked = sorted(range(5), key=lambda band: (-bands[band], band))
+        strongest = bands[ranked[0]]
+        if strongest <= 0:
+            return []
+        lanes = [cls._source_band_to_lane(ranked[0], lane_count)]
+        if rule.allow_chords:
+            for band in ranked[1:]:
+                lane = cls._source_band_to_lane(band, lane_count)
+                if lane not in lanes and bands[band] >= max(0.12, strongest * 0.42):
+                    lanes.append(lane)
+                if len(lanes) >= rule.max_chord_size:
+                    break
+        return sorted(lanes)
 
     def _assign_lanes(
         self,

@@ -25,6 +25,8 @@ def internal_gaps(chart: Chart) -> list[tuple[float, float]]:
 
 def balance_chart(chart: Chart, analysis: AnalysisResult) -> int:
     """Run after safety validation; accept only one-for-one safe replacements."""
+    if chart.metadata.get("generation_style") == "frequency":
+        return 0
     if chart.metadata.get("gap_balance_version") in (1, 2):
         return int(chart.metadata.get("gap_balance_moves", 0))
     limit = GAP_LIMITS[chart.difficulty]

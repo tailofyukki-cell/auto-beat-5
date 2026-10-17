@@ -742,7 +742,10 @@ def record_play(paths: AppPaths, profile: dict[str, Any], *, chart_key: str, res
     score = max(0, int(result["score"]))
     profile["lifetime_score"] = int(profile.get("lifetime_score", 0)) + score
     profile["wallet_score"] = int(profile.get("wallet_score", 0)) + score
-    old_score = int(profile.get("high_scores", {}).get(chart_key, 0))
+    previous_entries = ranking_entries(profile, chart_key, limit=1)
+    previous_best = previous_entries[0] if previous_entries else None
+    old_score = max(int(profile.get("high_scores", {}).get(chart_key, 0)),
+                    int(previous_best["score"]) if previous_best else 0)
     profile.setdefault("high_scores", {})[chart_key] = max(old_score, score)
     badges = result_badges(result, previous_best_score=old_score)
     saved_badges = profile.setdefault("badges", [])
@@ -760,12 +763,13 @@ def record_play(paths: AppPaths, profile: dict[str, Any], *, chart_key: str, res
         "accuracy": float(result.get("accuracy", 0.0)),
         "max_combo": int(result.get("max_combo", 0)),
         "rank": str(result.get("rank", "D")),
+        "miss_count": int(result.get("judgments", {}).get("MISS", 0)),
     }
     rankings = profile.setdefault("rankings", {})
     if not isinstance(rankings, dict):
         rankings = {}
         profile["rankings"] = rankings
-    existing = rankings.get(chart_key, [])
+    existing = ranking_entries(profile, chart_key)
     if not isinstance(existing, list):
         existing = []
     ordered = [*existing, entry]
@@ -789,6 +793,7 @@ def record_play(paths: AppPaths, profile: dict[str, Any], *, chart_key: str, res
         "made_top_ten": position > 0,
         "previous_best_score": old_score,
         "score_delta": score - old_score,
+        "previous_best": previous_best,
     }
     profile.setdefault("play_history", []).append({"played_at": played_at, **result, "chart_key": chart_key})
     newly_unlocked: list[str] = update_performance_unlocks(profile, chart_key=chart_key, result=result)

@@ -75,7 +75,8 @@ def build_chart_summary(chart: Chart, analysis: AnalysisResult) -> ChartSummary:
         validation_removed=int(chart.metadata.get("validation_removed", 0)),
         validation_issues=len(chart.metadata.get("validation_issues", [])),
         lane_usage_text=_lane_usage_text(lane_counts),
-        quality_note=_quality_note(lane_count, used_lanes, notes_per_second, peak, chord_events),
+        quality_note=("音域優先・偏り補正なし" if chart.metadata.get("generation_style") == "frequency"
+                      else _quality_note(lane_count, used_lanes, notes_per_second, peak, chord_events)),
         tendency=_estimate_tendency(notes_per_second, peak, chord_events, hold_notes),
     )
 
